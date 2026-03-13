@@ -241,7 +241,7 @@ test("scale display initialises at 1.00× and updates on ½× and 2× presses", 
 
   await page.locator("#scaleDoubleBtn").click();
   await expect(page.locator("#scaleDisplay")).toHaveText("2.00×");
-  await expect(page.locator("#statusMessage")).toContainText("2.00×");
+  await expect(page.locator("#statusMessage")).toContainText("×2");
 
   await page.locator("#scaleHalfBtn").click();
   await expect(page.locator("#scaleDisplay")).toHaveText("1.00×");
@@ -357,4 +357,35 @@ test("minimize footprint button reorients model and rebuilds", async ({ page }) 
   // Triangle count may be identical (same file, just rotated) or different if slider differs.
   // Either is valid; we confirm the viewer did not crash.
   await expect(page.locator("#statusMessage")).not.toContainText("failed");
+});
+
+test("non-uniform scale: unchecking Uniform applies scale to a single axis only", async ({ page }) => {
+  await page.setInputFiles("#fileInput", {
+    name: "tiny.stl",
+    mimeType: "model/stl",
+    buffer: Buffer.from(tinyAsciiStl)
+  });
+
+  await expect(page.locator("#fileName")).toHaveText("tiny.stl", { timeout: 10000 });
+
+  // Record baseline X and Z dimensions.
+  const baseX = parseFloat(await page.locator("#dimX").inputValue());
+  const baseZ = parseFloat(await page.locator("#dimZ").inputValue());
+
+  // Uncheck uniform scale and type a new Y value.
+  await page.locator("#uniformScaleCheckbox").uncheck();
+  await page.locator("#dimY").fill("50");
+  await page.locator("#dimY").press("Enter");
+
+  // Status message should reference Y axis.
+  await expect(page.locator("#statusMessage")).toContainText("Y");
+
+  // X and Z should be unchanged; Y should differ.
+  const newX = parseFloat(await page.locator("#dimX").inputValue());
+  const newZ = parseFloat(await page.locator("#dimZ").inputValue());
+  expect(Math.abs(newX - baseX)).toBeLessThan(0.01);
+  expect(Math.abs(newZ - baseZ)).toBeLessThan(0.01);
+
+  // Scale display should show "—" (mixed scales).
+  await expect(page.locator("#scaleDisplay")).toHaveText("—");
 });

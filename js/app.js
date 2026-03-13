@@ -27,6 +27,7 @@ document.addEventListener("DOMContentLoaded", () => {
   const scaleDoubleBtn = document.getElementById("scaleDoubleBtn");
   const scaleDisplay = document.getElementById("scaleDisplay");
   const minimizeFootprintBtn = document.getElementById("minimizeFootprintBtn");
+  const uniformScaleCheckbox = document.getElementById("uniformScaleCheckbox");
 
   if (!window.THREE || !THREE.OrbitControls || !THREE.STLLoader) {
     statusMessage.textContent = "Three.js failed to load. Check your internet connection and refresh.";
@@ -122,7 +123,10 @@ document.addEventListener("DOMContentLoaded", () => {
   let currentFileName = "";
   let currentFileStem = "";
   let sliderDebounceTimer = null;
-  let currentModelScale = 1.0;
+  let scaleX = 1.0;
+  let scaleY = 1.0;
+  let scaleZ = 1.0;
+  let isUniformScale = true;
   let savedLocalBounds = null;
   let box3Helper = null;
   let bboxOverlayActive = false;
@@ -380,6 +384,7 @@ document.addEventListener("DOMContentLoaded", () => {
     if (scaleHalfBtn) scaleHalfBtn.disabled = !hasModel;
     if (scaleDoubleBtn) scaleDoubleBtn.disabled = !hasModel;
     if (minimizeFootprintBtn) minimizeFootprintBtn.disabled = !hasModel;
+    if (uniformScaleCheckbox) uniformScaleCheckbox.disabled = !hasModel;
     if (dimXInput) dimXInput.disabled = !hasModel;
     if (dimYInput) dimYInput.disabled = !hasModel;
     if (dimZInput) dimZInput.disabled = !hasModel;
@@ -502,10 +507,21 @@ document.addEventListener("DOMContentLoaded", () => {
       return;
     }
 
-    applyModelTransform(clamp(mmValue / baseDim, 1 / 64, 64));
+    const newScale = clamp(mmValue / baseDim, 1 / 64, 64);
+    let sx = scaleX, sy = scaleY, sz = scaleZ;
+
+    if (isUniformScale) {
+      sx = sy = sz = newScale;
+    } else {
+      if (axis === "x") sx = newScale;
+      else if (axis === "y") sy = newScale;
+      else sz = newScale;
+    }
+
+    applyModelTransform(sx, sy, sz);
     updateMetrics(currentFileName, currentFillMesh.geometry);
     resetCameraToBounds();
-    setStatus(`Scaled to ${currentModelScale.toFixed(3)}× (${axis.toUpperCase()} = ${formatDimension(mmValue)} mm).`);
+    setStatus(`${axis.toUpperCase()} = ${formatDimension(mmValue)} mm (${newScale.toFixed(3)}×).`);
   }
 
   // Attaches Enter/Escape/blur handlers to a dimension input.
@@ -552,35 +568,41 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // Sets uniform scale on the model root, recalculates the grid-rest lift, and
   // updates currentBounds in world space. Must be called after savedLocalBounds is set.
-  function applyModelTransform(scale) {
+  // Applies per-axis scale, updates grid lift, world-space bounds, and scale display.
+  function applyModelTransform(sx, sy, sz) {
     if (!currentModelRoot || !savedLocalBounds) {
       return;
     }
 
-    currentModelScale = scale;
-    currentModelRoot.scale.setScalar(scale);
+    scaleX = sx;
+    scaleY = sy;
+    scaleZ = sz;
+    currentModelRoot.scale.set(sx, sy, sz);
 
-    // Geometry centroid is at origin; min.y is negative (below origin by half-height).
-    // Multiplying by scale gives the world-space distance needed to rest the base on Y=0.
-    const liftY = -savedLocalBounds.min.y * scale;
+    // Lift model so its base sits on Y=0 after Y-scaling.
+    const liftY = -savedLocalBounds.min.y * sy;
     currentModelRoot.position.y = liftY;
 
-    // Rebuild world-space bounds from local bounds, scale, and lift.
+    // Rebuild world-space bounds from local bounds, per-axis scale, and lift.
     currentBounds = new THREE.Box3(
       new THREE.Vector3(
-        savedLocalBounds.min.x * scale,
-        savedLocalBounds.min.y * scale + liftY,
-        savedLocalBounds.min.z * scale
+        savedLocalBounds.min.x * sx,
+        savedLocalBounds.min.y * sy + liftY,
+        savedLocalBounds.min.z * sz
       ),
       new THREE.Vector3(
-        savedLocalBounds.max.x * scale,
-        savedLocalBounds.max.y * scale + liftY,
-        savedLocalBounds.max.z * scale
+        savedLocalBounds.max.x * sx,
+        savedLocalBounds.max.y * sy + liftY,
+        savedLocalBounds.max.z * sz
       )
     );
 
     if (scaleDisplay) {
-      scaleDisplay.textContent = `${currentModelScale.toFixed(2)}×`;
+      if (sx === sy && sy === sz) {
+        scaleDisplay.textContent = `${sx.toFixed(2)}×`;
+      } else {
+        scaleDisplay.textContent = "—";
+      }
     }
   }
 
@@ -638,6 +660,9 @@ document.addEventListener("DOMContentLoaded", () => {
     centerGeometryAtOrigin(baseGeometry);
     baseGeometry.computeBoundingBox();
 
+    // Rotation changes the geometry axes, so per-axis scale no longer maps to
+    // the original dimensions. Reset to 1× so the display is not misleading.
+    scaleX = scaleY = scaleZ = 1.0;
     rebuildModelFromSettings();
     setStatus("Model reoriented to minimize XZ footprint.");
   }
@@ -915,7 +940,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
     // Apply the current scale (1.0 for new loads, preserved value for refinement rebuilds).
     // This sets currentModelRoot.scale, position.y (grid lift), and currentBounds.
-    applyModelTransform(currentModelScale);
+    applyModelTransform(scaleX, scaleY, scaleZ);
 
     scene.add(currentModelRoot);
     currentFileStem = stripFileExtension(fileName || "model");
@@ -1021,7 +1046,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
     baseGeometry = preparedBase;
     currentFileName = fileName;
-    currentModelScale = 1.0;  // reset scale for every new file load
+    scaleX = scaleY = scaleZ = 1.0;  // reset scale for every new file load
 
     const bounds = getRefinementBounds();
     const startingMultiplier = normalizeRequestedMultiplier(1, bounds);
@@ -1133,13 +1158,12 @@ document.addEventListener("DOMContentLoaded", () => {
       return null;
     }
 
-    if (Math.abs(currentModelScale - 1.0) < 1e-6) {
+    if (Math.abs(scaleX - 1.0) < 1e-6 && Math.abs(scaleY - 1.0) < 1e-6 && Math.abs(scaleZ - 1.0) < 1e-6) {
       return null;
     }
 
     const scaledGeom = currentFillMesh.geometry.clone();
-    const s = currentModelScale;
-    scaledGeom.applyMatrix4(new THREE.Matrix4().makeScale(s, s, s));
+    scaledGeom.applyMatrix4(new THREE.Matrix4().makeScale(scaleX, scaleY, scaleZ));
     return scaledGeom;
   }
 
@@ -1360,10 +1384,14 @@ document.addEventListener("DOMContentLoaded", () => {
       if (!currentModelRoot) {
         return;
       }
-      applyModelTransform(Math.max(currentModelScale * 0.5, 1 / 64));
+      applyModelTransform(
+        clamp(scaleX * 0.5, 1 / 64, 64),
+        clamp(scaleY * 0.5, 1 / 64, 64),
+        clamp(scaleZ * 0.5, 1 / 64, 64)
+      );
       updateMetrics(currentFileName, currentFillMesh.geometry);
       resetCameraToBounds();
-      setStatus(`Model scaled to ${currentModelScale.toFixed(2)}×.`);
+      setStatus(`Model scaled ÷2.`);
     });
   }
 
@@ -1372,10 +1400,14 @@ document.addEventListener("DOMContentLoaded", () => {
       if (!currentModelRoot) {
         return;
       }
-      applyModelTransform(Math.min(currentModelScale * 2.0, 64));
+      applyModelTransform(
+        clamp(scaleX * 2.0, 1 / 64, 64),
+        clamp(scaleY * 2.0, 1 / 64, 64),
+        clamp(scaleZ * 2.0, 1 / 64, 64)
+      );
       updateMetrics(currentFileName, currentFillMesh.geometry);
       resetCameraToBounds();
-      setStatus(`Model scaled to ${currentModelScale.toFixed(2)}×.`);
+      setStatus(`Model scaled ×2.`);
     });
   }
 
@@ -1385,6 +1417,12 @@ document.addEventListener("DOMContentLoaded", () => {
         return;
       }
       minimizeFootprint();
+    });
+  }
+
+  if (uniformScaleCheckbox) {
+    uniformScaleCheckbox.addEventListener("change", () => {
+      isUniformScale = uniformScaleCheckbox.checked;
     });
   }
 

@@ -120,6 +120,21 @@
         <svg id="bboxPreviewSvg" class="bbox-preview-svg" viewBox="0 36 120 54"
              xmlns="http://www.w3.org/2000/svg" aria-hidden="true" style="display:none"></svg>
       </div>
+      <div class="canvas-overlay-group canvas-overlay-group--bottom">
+        <button id="minimizeFootprintBtn" class="canvas-overlay-btn" title="Orient to minimize XZ footprint" type="button" disabled>
+          <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" width="22" height="22" aria-hidden="true" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="7" y="7" width="10" height="10" stroke="currentColor" stroke-width="1.5" fill="none" rx="1"/>
+            <line x1="3" y1="3" x2="7" y2="7" stroke="currentColor" stroke-width="1.5"/>
+            <polyline points="7,4 7,7 4,7" stroke="currentColor" stroke-width="1.5" fill="none"/>
+            <line x1="21" y1="3" x2="17" y2="7" stroke="currentColor" stroke-width="1.5"/>
+            <polyline points="17,4 17,7 20,7" stroke="currentColor" stroke-width="1.5" fill="none"/>
+            <line x1="3" y1="21" x2="7" y2="17" stroke="currentColor" stroke-width="1.5"/>
+            <polyline points="7,20 7,17 4,17" stroke="currentColor" stroke-width="1.5" fill="none"/>
+            <line x1="21" y1="21" x2="17" y2="17" stroke="currentColor" stroke-width="1.5"/>
+            <polyline points="17,20 17,17 20,17" stroke="currentColor" stroke-width="1.5" fill="none"/>
+          </svg>
+        </button>
+      </div>
     </div>
 
     <div class="viewer-transform-row">
@@ -136,7 +151,10 @@
         <button class="model-tool-btn" id="scaleHalfBtn" type="button" title="Scale ÷2" disabled>½×</button>
         <span class="model-tool-scale-display" id="scaleDisplay">1.00×</span>
         <button class="model-tool-btn" id="scaleDoubleBtn" type="button" title="Scale ×2" disabled>2×</button>
-        <button class="model-tool-btn" id="minimizeFootprintBtn" type="button" title="Orient to minimize XZ footprint" disabled>Min Footprint</button>
+        <label class="model-tool-uniform-label" title="Lock all axes to scale uniformly">
+          <input type="checkbox" id="uniformScaleCheckbox" checked>
+          <span>Uniform</span>
+        </label>
       </div>
     </div>
 

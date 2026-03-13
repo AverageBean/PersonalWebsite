@@ -232,6 +232,11 @@ body {
   gap: 0.35rem;
 }
 
+.canvas-overlay-group--bottom {
+  top: auto;
+  bottom: 0.25rem;
+}
+
 .canvas-overlay-btn {
   background: none;
   border: none;
@@ -245,12 +250,17 @@ body {
   flex-shrink: 0;
 }
 
-.canvas-overlay-btn:hover {
+.canvas-overlay-btn:hover:not(:disabled) {
   opacity: 0.9;
 }
 
 .canvas-overlay-btn.is-active {
   opacity: 1;
+}
+
+.canvas-overlay-btn:disabled {
+  opacity: 0.25;
+  cursor: default;
 }
 
 .bbox-preview-svg {
@@ -386,6 +396,25 @@ body {
 .model-tool-btn:disabled {
   opacity: 0.45;
   cursor: not-allowed;
+}
+
+.model-tool-uniform-label {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.78rem;
+  color: var(--text-dim);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.model-tool-uniform-label input[type="checkbox"] {
+  width: 0.9rem;
+  height: 0.9rem;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
 }
 
 #viewerCanvas {

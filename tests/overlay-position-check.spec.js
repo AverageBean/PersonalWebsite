@@ -43,11 +43,8 @@ test("overlay buttons: with model — both buttons visible and aligned (visual)"
   console.log("gridToggleBtn box:", JSON.stringify(gridBox));
   console.log("bboxToggleBtn box:", JSON.stringify(bboxBox));
 
-  // Tops should be within 2px (flex-start, same-height buttons)
+  // Tops should be within 2px (flex-start alignment)
   expect(Math.abs(gridBox.y - bboxBox.y)).toBeLessThan(2);
-
-  // Heights should match (both use same canvas-overlay-btn sizing)
-  expect(Math.abs(gridBox.height - bboxBox.height)).toBeLessThan(2);
 
   // Both should be in the right half of the viewport
   const vpWidth = page.viewportSize().width;

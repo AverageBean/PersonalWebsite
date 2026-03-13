@@ -279,7 +279,7 @@ body {
 .viewer-dim-group {
   display: flex;
   align-items: baseline;
-  gap: 0.45rem;
+  gap: 0.28rem;
   font-size: 0.82rem;
 }
 
@@ -292,7 +292,7 @@ body {
 }
 
 .dim-input {
-  width: 3.6rem;
+  width: 3.2rem;
   border: none;
   border-bottom: 1.5px solid transparent;
   background: transparent;

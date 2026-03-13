@@ -9,7 +9,7 @@ document.addEventListener("DOMContentLoaded", () => {
   const dimXInput = document.getElementById("dimX");
   const dimYInput = document.getElementById("dimY");
   const dimZInput = document.getElementById("dimZ");
-  const bboxPreviewSvg = document.getElementById("bboxPreviewSvg");
+  const bboxToggleBtn = document.getElementById("bboxToggleBtn");
   const controlPresetSelect = document.getElementById("controlPreset");
   const viewStyleSelect = document.getElementById("viewStyle");
   const backgroundStyleSelect = document.getElementById("backgroundStyle");
@@ -397,62 +397,6 @@ document.addEventListener("DOMContentLoaded", () => {
     updateBboxPreview();
   }
 
-  // Builds the SVG interior for the bounding-box preview.
-  // Cabinet projection: X → right, Y → up, Z → upper-left at 45° half-length.
-  // nW/nH/nD are each normalized so the longest axis = 1.
-  function drawBboxSvg(sw, sh, sd) {
-    const maxDim = Math.max(sw, sh, sd, 1e-6);
-    const nW = sw / maxDim;
-    const nH = sh / maxDim;
-    const nD = sd / maxDim;
-
-    const S = 30;    // px per normalized unit
-    const C = 0.354; // cos45° × 0.5 — cabinet projection oblique factor
-    const ox = 35;   // SVG x origin (front-bottom-left corner of box)
-    const oy = 80;   // SVG y origin
-
-    function pt(wx, wy, wz) {
-      return [
-        +(ox + wx * nW * S - wz * nD * S * C).toFixed(1),
-        +(oy - wy * nH * S - wz * nD * S * C).toFixed(1)
-      ];
-    }
-
-    // 8 corners — front face (z=0) then back face (z=1)
-    const v = [
-      pt(0, 0, 0), pt(1, 0, 0), pt(1, 1, 0), pt(0, 1, 0),
-      pt(0, 0, 1), pt(1, 0, 1), pt(1, 1, 1), pt(0, 1, 1)
-    ];
-
-    function ln(a, b, attr) {
-      return `<line x1="${a[0]}" y1="${a[1]}" x2="${b[0]}" y2="${b[1]}" ${attr}/>`;
-    }
-
-    const vi = `stroke="#0f6e8c" stroke-width="1.5" stroke-linecap="round"`;
-    const hi = `stroke="#0f6e8c" stroke-width="1" stroke-dasharray="3,2" opacity="0.3"`;
-
-    const edges = [
-      // Front face (fully visible)
-      ln(v[0], v[1], vi), ln(v[1], v[2], vi), ln(v[2], v[3], vi), ln(v[3], v[0], vi),
-      // Right face extras
-      ln(v[1], v[5], vi), ln(v[5], v[6], vi), ln(v[6], v[2], vi),
-      // Top face extras
-      ln(v[3], v[7], vi), ln(v[7], v[6], vi),
-      // Hidden back/left/bottom edges
-      ln(v[0], v[4], hi), ln(v[4], v[5], hi), ln(v[4], v[7], hi)
-    ].join("");
-
-    // Axis letter labels at the far end of each axis
-    const ls = `font-family="system-ui,sans-serif" font-size="7" font-weight="700" fill="#0f6e8c"`;
-    const axisLabels = [
-      `<text x="${(+v[1][0] + 3).toFixed(1)}" y="${(+v[1][1] + 3).toFixed(1)}" ${ls} text-anchor="start">X</text>`,
-      `<text x="${(+v[0][0] - 3).toFixed(1)}" y="${(+v[0][1] + 9).toFixed(1)}" ${ls} text-anchor="end">Y</text>`,
-      `<text x="${(+v[4][0] - 2).toFixed(1)}" y="${(+v[4][1] + 3).toFixed(1)}" ${ls} text-anchor="end">Z</text>`
-    ].join("");
-
-    return edges + axisLabels;
-  }
-
   // Keeps the Three.js Box3Helper in sync with currentBounds and bboxOverlayActive.
   function syncBox3Helper() {
     if (!bboxOverlayActive || !currentBounds || !currentFillMesh) {
@@ -471,21 +415,14 @@ document.addEventListener("DOMContentLoaded", () => {
     box3Helper.visible = true;
   }
 
+  // Syncs the bbox toggle button's active/disabled state and the 3D overlay.
   function updateBboxPreview() {
-    if (!bboxPreviewSvg) {
-      return;
+    const hasModel = Boolean(currentFillMesh);
+    if (bboxToggleBtn) {
+      bboxToggleBtn.disabled = !hasModel;
+      bboxToggleBtn.classList.toggle("is-active", hasModel && bboxOverlayActive);
+      bboxToggleBtn.setAttribute("aria-pressed", String(hasModel && bboxOverlayActive));
     }
-
-    if (!savedLocalBounds || !currentFillMesh) {
-      bboxPreviewSvg.style.display = "none";
-      syncBox3Helper();
-      return;
-    }
-
-    bboxPreviewSvg.style.display = "";
-    const size = currentBounds.getSize(new THREE.Vector3());
-    bboxPreviewSvg.innerHTML = drawBboxSvg(size.x, size.y, size.z);
-    bboxPreviewSvg.classList.toggle("is-active", bboxOverlayActive);
     syncBox3Helper();
   }
 
@@ -1047,6 +984,7 @@ document.addEventListener("DOMContentLoaded", () => {
     baseGeometry = preparedBase;
     currentFileName = fileName;
     scaleX = scaleY = scaleZ = 1.0;  // reset scale for every new file load
+    bboxOverlayActive = false;
 
     const bounds = getRefinementBounds();
     const startingMultiplier = normalizeRequestedMultiplier(1, bounds);
@@ -1369,8 +1307,8 @@ document.addEventListener("DOMContentLoaded", () => {
   bindDimInput(dimYInput, "y");
   bindDimInput(dimZInput, "z");
 
-  if (bboxPreviewSvg) {
-    bboxPreviewSvg.addEventListener("click", () => {
+  if (bboxToggleBtn) {
+    bboxToggleBtn.addEventListener("click", () => {
       if (!currentFillMesh) {
         return;
       }

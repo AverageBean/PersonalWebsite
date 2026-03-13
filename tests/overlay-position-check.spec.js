@@ -16,8 +16,9 @@ test("overlay buttons: no model — grid button visible in corner (visual)", asy
   });
   // Grid button must be present and visible
   await expect(page.locator("#gridToggleBtn")).toBeVisible();
-  // Bbox SVG must be hidden (no model)
-  await expect(page.locator("#bboxPreviewSvg")).toBeHidden();
+  // Bbox toggle must be visible but disabled (no model loaded)
+  await expect(page.locator("#bboxToggleBtn")).toBeVisible();
+  await expect(page.locator("#bboxToggleBtn")).toBeDisabled();
 });
 
 test("overlay buttons: with model — both buttons visible and aligned (visual)", async ({ page }) => {
@@ -30,22 +31,26 @@ test("overlay buttons: with model — both buttons visible and aligned (visual)"
     path: path.join(TESTOUTPUT_DIR, `${RUN_DATE}_overlay-with-model.png`)
   });
 
-  // Both must be visible
+  // Both must be visible and enabled after load
   await expect(page.locator("#gridToggleBtn")).toBeVisible();
-  await expect(page.locator("#bboxPreviewSvg")).toBeVisible();
+  await expect(page.locator("#bboxToggleBtn")).toBeVisible();
+  await expect(page.locator("#bboxToggleBtn")).toBeEnabled();
 
-  // Measure their bounding boxes — top edges should be within 4px of each other
+  // Measure their bounding boxes
   const gridBox = await page.locator("#gridToggleBtn").boundingBox();
-  const svgBox  = await page.locator("#bboxPreviewSvg").boundingBox();
+  const bboxBox = await page.locator("#bboxToggleBtn").boundingBox();
 
   console.log("gridToggleBtn box:", JSON.stringify(gridBox));
-  console.log("bboxPreviewSvg box:", JSON.stringify(svgBox));
+  console.log("bboxToggleBtn box:", JSON.stringify(bboxBox));
 
-  // Tops should be within 2px (flex-start alignment)
-  expect(Math.abs(gridBox.y - svgBox.y)).toBeLessThan(2);
+  // Tops should be within 2px (flex-start, same-height buttons)
+  expect(Math.abs(gridBox.y - bboxBox.y)).toBeLessThan(2);
+
+  // Heights should match (both use same canvas-overlay-btn sizing)
+  expect(Math.abs(gridBox.height - bboxBox.height)).toBeLessThan(2);
 
   // Both should be in the right half of the viewport
   const vpWidth = page.viewportSize().width;
   expect(gridBox.x + gridBox.width).toBeGreaterThan(vpWidth * 0.5);
-  expect(svgBox.x + svgBox.width).toBeGreaterThan(vpWidth * 0.5);
+  expect(bboxBox.x + bboxBox.width).toBeGreaterThan(vpWidth * 0.5);
 });

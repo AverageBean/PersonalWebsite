@@ -263,23 +263,6 @@ body {
   cursor: default;
 }
 
-.bbox-preview-svg {
-  width: 98px;
-  height: 44px;
-  cursor: pointer;
-  opacity: 0.55;
-  transition: opacity 120ms ease;
-  flex-shrink: 0;
-}
-
-.bbox-preview-svg:hover {
-  opacity: 0.9;
-}
-
-.bbox-preview-svg.is-active {
-  opacity: 1;
-}
-
 /* ── Transform row (dimensions + scale) ──────────────────────────────── */
 
 .viewer-transform-row {

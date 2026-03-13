@@ -117,8 +117,13 @@
             <line x1="0.75" y1="16" x2="23.25" y2="16" stroke="currentColor" stroke-width="1" opacity="0.65"/>
           </svg>
         </button>
-        <svg id="bboxPreviewSvg" class="bbox-preview-svg" viewBox="0 36 120 54"
-             xmlns="http://www.w3.org/2000/svg" aria-hidden="true" style="display:none"></svg>
+        <button id="bboxToggleBtn" class="canvas-overlay-btn" title="Toggle bounding box" type="button" aria-pressed="false" disabled>
+          <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" width="22" height="22" aria-hidden="true" stroke-linejoin="round">
+            <polygon points="12,3 20,7 12,11 4,7" stroke="currentColor" stroke-width="1.5" fill="none"/>
+            <polygon points="20,7 20,17 12,21 12,11" stroke="currentColor" stroke-width="1.5" fill="none"/>
+            <polygon points="4,7 12,11 12,21 4,17" stroke="currentColor" stroke-width="1.5" fill="none"/>
+          </svg>
+        </button>
       </div>
       <div class="canvas-overlay-group canvas-overlay-group--bottom">
         <button id="minimizeFootprintBtn" class="canvas-overlay-btn" title="Orient to minimize XZ footprint" type="button" disabled>

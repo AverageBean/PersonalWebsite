@@ -1,0 +1,11 @@
+[mcp_servers.playwright]
+command = "npx"
+args = ["@playwright/mcp@latest"]
+
+[mcp_servers.onshape]
+command = "C:\\Users\\berry\\code\\onshape-mcp\\venv\\Scripts\\python.exe"
+args = ["-m", "onshape_mcp.server"]
+
+[mcp_servers.onshape.env]
+ONSHAPE_ACCESS_KEY = "on_YqfmwI7kg0CdhOfiQ1lje"
+ONSHAPE_SECRET_KEY = "GzPWli8zHbP83evshNrxWwp2GLuiIZubmnpYiBNDTmqPWyyz"

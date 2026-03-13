@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cd \"C:/Users/berry/WebstormProjects/PersonalWebsite\" && npm run test:e2e 2>&1)"
+    ]
+  }
+}

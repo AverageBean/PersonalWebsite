@@ -1,0 +1,189 @@
+<!doctype html>
+<html class="no-js" lang="en">
+
+<head>
+  <meta charset="utf-8">
+  <meta content="width=device-width, initial-scale=1" name="viewport">
+  <title>Joseph Berryman | Biomedical Engineer</title>
+  <link href="css/style.css" rel="stylesheet">
+  <meta
+    content="Professional portfolio with an interactive STL drag-and-drop viewer for exploring 3D models directly in the browser."
+    name="description">
+
+  <meta content="AJ Berry | Software Engineer" property="og:title">
+  <meta content="website" property="og:type">
+  <meta content="" property="og:url">
+  <meta content="" property="og:image">
+  <meta content="" property="og:image:alt">
+
+  <link href="/favicon.ico" rel="icon" sizes="any">
+  <link href="/icon.svg" rel="icon" type="image/svg+xml">
+  <link href="icon.png" rel="apple-touch-icon">
+
+  <link href="site.webmanifest" rel="manifest">
+  <meta content="#fafafa" name="theme-color">
+</head>
+
+<body>
+<main class="site-shell">
+  <section class="panel intro-panel">
+    <p class="eyebrow">MS Biomedical Engineering &middot; University of Tennessee</p>
+    <h1 class="name">Joseph Berryman</h1>
+    <p class="role">Biomedical Engineer</p>
+    <p class="summary">
+      Graduate researcher with experience spanning cardiovascular biomechanics and neuromorphic materials science.
+      Specialized in precision instrumentation, DAQ system design, and custom sensor fabrication.
+      Co-author of published work in <em>Advanced Electronic Materials</em>.
+    </p>
+
+    <section class="section-block">
+      <h2>Core Focus</h2>
+      <ul class="chip-list">
+        <li>Research Oriented Engineering</li>
+        <li>3D modeling and design</li>
+        <li>Experienced Signal Acquirer</li>
+      </ul>
+    </section>
+
+    <section class="section-block">
+      <h2>Learning Notes</h2>
+      <ol class="learning-list">
+        <li>Use CSS variables for consistent, maintainable visual design.</li>
+        <li>Separate layout from interaction logic for easier iteration.</li>
+        <li>Keep 3D viewer code focused: scene setup, file loading, and camera controls.</li>
+      </ol>
+    </section>
+  </section>
+
+  <section class="panel viewer-panel">
+    <div class="viewer-header">
+      <div>
+        <p class="eyebrow"></p>
+        <h2>STL Viewer</h2>
+      </div>
+      <button id="resetCameraButton" type="button">Reset View</button>
+    </div>
+
+    <div class="viewer-controls">
+      <label class="control-field">
+        <span>Control preset</span>
+        <select id="controlPreset">
+          <option value="web">Web Orbit</option>
+          <option value="onshape" selected>Onshape-like</option>
+          <option value="solidworks">SolidWorks-like</option>
+        </select>
+      </label>
+      <label class="control-field">
+        <span>View style</span>
+        <select id="viewStyle">
+          <option value="solid">Solid Fill</option>
+          <option value="overlay">Solid + Triangle Lines</option>
+          <option value="wireframe">Triangle Lines Only</option>
+          <option value="flat">Flat Shaded</option>
+        </select>
+      </label>
+      <label class="control-field control-color" for="partColor">
+        <span>Part color</span>
+        <input type="color" id="partColor" value="#4c86a8">
+      </label>
+      <label class="control-field">
+        <span>Background</span>
+        <select id="backgroundStyle">
+          <option value="lab">Lab Light</option>
+          <option value="neutral">Neutral Gray</option>
+          <option value="dark">Dark Studio</option>
+          <option value="warm">Warm Paper</option>
+        </select>
+      </label>
+    </div>
+
+    <div class="drop-zone" id="dropZone" role="button" tabindex="0">
+      <p class="drop-zone-title">Drag and drop an STL or SLDPRT file</p>
+      <p class="drop-zone-subtitle">or click to browse your computer</p>
+      <input accept=".stl,.sldprt" id="fileInput" type="file">
+    </div>
+
+    <div class="viewer-canvas-wrapper">
+      <div class="viewer-canvas-frame">
+        <div id="viewerCanvas" aria-label="3D STL preview window"></div>
+      </div>
+      <div class="canvas-overlay-group">
+        <button id="gridToggleBtn" class="canvas-overlay-btn is-active" title="Toggle grid" type="button" aria-pressed="true">
+          <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" width="22" height="22" aria-hidden="true">
+            <rect x="0.75" y="0.75" width="22.5" height="22.5" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" rx="1"/>
+            <line x1="8" y1="0.75" x2="8" y2="23.25" stroke="currentColor" stroke-width="1" opacity="0.65"/>
+            <line x1="16" y1="0.75" x2="16" y2="23.25" stroke="currentColor" stroke-width="1" opacity="0.65"/>
+            <line x1="0.75" y1="8" x2="23.25" y2="8" stroke="currentColor" stroke-width="1" opacity="0.65"/>
+            <line x1="0.75" y1="16" x2="23.25" y2="16" stroke="currentColor" stroke-width="1" opacity="0.65"/>
+          </svg>
+        </button>
+        <svg id="bboxPreviewSvg" class="bbox-preview-svg" viewBox="0 36 120 54"
+             xmlns="http://www.w3.org/2000/svg" aria-hidden="true" style="display:none"></svg>
+      </div>
+    </div>
+
+    <div class="viewer-transform-row">
+      <div class="viewer-dim-group">
+        <span class="dim-axis">X</span>
+        <input class="dim-input" id="dimX" type="number" step="any" min="0.001" placeholder="—" disabled>
+        <span class="dim-axis">Y</span>
+        <input class="dim-input" id="dimY" type="number" step="any" min="0.001" placeholder="—" disabled>
+        <span class="dim-axis">Z</span>
+        <input class="dim-input" id="dimZ" type="number" step="any" min="0.001" placeholder="—" disabled>
+        <span class="dim-unit">mm</span>
+      </div>
+      <div class="viewer-scale-group">
+        <button class="model-tool-btn" id="scaleHalfBtn" type="button" title="Scale ÷2" disabled>½×</button>
+        <span class="model-tool-scale-display" id="scaleDisplay">1.00×</span>
+        <button class="model-tool-btn" id="scaleDoubleBtn" type="button" title="Scale ×2" disabled>2×</button>
+        <button class="model-tool-btn" id="minimizeFootprintBtn" type="button" title="Orient to minimize XZ footprint" disabled>Min Footprint</button>
+      </div>
+    </div>
+
+    <section class="refinement-panel" aria-label="Triangle refinement control">
+      <label for="refinementSlider">Triangle Multiplier</label>
+      <input id="refinementSlider" type="range" min="0.10" max="16.00" step="0.10" value="1.00">
+      <div class="refinement-scale">
+        <span id="refinementMinHint">0.10x min</span>
+        <strong id="refinementValue">1.00x</strong>
+        <span id="refinementMaxHint">16.00x max</span>
+      </div>
+    </section>
+
+    <div class="viewer-metrics">
+      <p><span>File:</span> <strong id="fileName">None loaded</strong></p>
+      <p><span>Triangles:</span> <strong id="triangleCount">0</strong></p>
+    </div>
+
+    <p class="usage-tip" id="usageTip">
+      Rotation: left-click + drag. Pan: right-click + drag. Zoom: scroll wheel.
+    </p>
+    <p class="status-message" id="statusMessage">Viewer ready. Drop an STL or SLDPRT file to begin.</p>
+    <section class="export-panel" aria-label="Model export">
+      <div class="export-row">
+        <label class="control-field" for="exportFormat">
+          <span>Export format</span>
+          <select id="exportFormat">
+            <option value="stl">STL (.stl)</option>
+            <option value="obj">OBJ (.obj)</option>
+            <option value="glb">GLB (.glb)</option>
+          </select>
+        </label>
+        <button id="downloadExportButton" type="button" disabled>Download Export</button>
+      </div>
+      <p class="export-hint" id="exportHint">Load a model to enable export downloads.</p>
+    </section>
+  </section>
+</main>
+
+<script src="https://unpkg.com/three@0.128.0/build/three.min.js"></script>
+<script src="https://unpkg.com/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<script src="https://unpkg.com/three@0.128.0/examples/js/loaders/STLLoader.js"></script>
+<script src="https://unpkg.com/three@0.128.0/examples/js/exporters/STLExporter.js"></script>
+<script src="https://unpkg.com/three@0.128.0/examples/js/exporters/OBJExporter.js"></script>
+<script src="https://unpkg.com/three@0.128.0/examples/js/exporters/GLTFExporter.js"></script>
+<script src="js/app.js"></script>
+
+</body>
+
+</html>

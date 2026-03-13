@@ -1,0 +1,35 @@
+{
+  "name": "joseph-berryman-portfolio",
+  "version": "0.0.1",
+  "description": "Personal portfolio website for Joseph Berryman, biomedical engineer",
+  "private": true,
+  "keywords": [
+    "biomedical engineering", "portfolio", "3D viewer", "STL"
+  ],
+  "license": "UNLICENSED",
+  "author": "Joseph Berryman <JosephBBerryman@gmail.com>",
+  "scripts": {
+    "test": "npm run test:e2e",
+    "start": "webpack serve --hot --config webpack.config.dev.js",
+    "build": "webpack --config webpack.config.prod.js",
+    "pw:install": "playwright install chromium",
+    "test:e2e": "playwright test",
+    "test:e2e:ui": "playwright test --ui",
+    "test:e2e:debug": "playwright test --debug",
+    "test:e2e:headed": "playwright test --headed",
+    "test:e2e:report": "playwright show-report",
+    "pw:codegen": "playwright codegen http://127.0.0.1:8081",
+    "mcp:playwright": "npx @playwright/mcp@latest --port 8931",
+    "start:e2e": "webpack serve --config webpack.config.dev.js --no-hot --no-live-reload",
+    "convert:start": "node tools/converter-server.js"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.58.2",
+    "copy-webpack-plugin": "^11.0.0",
+    "html-webpack-plugin": "^5.6.0",
+    "webpack": "^5.91.0",
+    "webpack-cli": "^5.1.4",
+    "webpack-dev-server": "^5.0.4",
+    "webpack-merge": "^5.10.0"
+  }
+}

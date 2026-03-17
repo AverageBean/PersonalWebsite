@@ -12,6 +12,10 @@ Keep a `./README.MD` up to date with currently live features and features that a
 
 Record memory within this project directory and do not use you default memory location. Define new memory for each prompt with the objective of explaining
 
+Do not push to git by default. The user will tell you when to push after they have verified.
+
+Keep detailed commit notes for versions when they are pushed to git.
+
 ## Testing
 Thoroughly test changes to the website using Playwright.
 
@@ -49,4 +53,4 @@ Keep a log of each major change applied to the website with the objective of tea
 
 The major objective of this project is to teach me how to use coding agents for web design.
 
-Generate a now file in `./LearningLog` with the format of Date_ProjectTitle which contains am explanation of changes made.
+Generate a new file in `./LearningLog` with the format of Date_ProjectTitle which contains an explanation of changes after each commit to git. Do not overwrite or delete logs without user approval! These logs are for educational purpose.

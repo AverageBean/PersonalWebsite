@@ -45,6 +45,8 @@ const HOST = process.env.CAD_CONVERTER_HOST || "127.0.0.1";
 const PORT = Number(process.env.CAD_CONVERTER_PORT || 8090);
 const MAX_UPLOAD_BYTES = Number(process.env.CAD_CONVERTER_MAX_UPLOAD || 120 * 1024 * 1024);
 const converterScript = path.join(__dirname, "convert-sldprt-with-freecad.py");
+const stepConverterScript = path.join(__dirname, "convert-stl-to-step-with-freecad.py");
+const parametricConverterScript = path.join(__dirname, "convert-stl-to-step-parametric-with-freecad.py");
 const CLOUDCONVERT_API_KEY = process.env.CLOUDCONVERT_API_KEY || "";
 const CLOUDCONVERT_API_BASE = process.env.CLOUDCONVERT_API_BASE || "https://api.cloudconvert.com/v2";
 const ONSHAPE_ACCESS_KEY = process.env.ONSHAPE_ACCESS_KEY || "";
@@ -299,6 +301,36 @@ async function runCloudConvertConversion(inputPath, outputPath) {
   }
 
   await downloadToFile(downloadUrl, outputPath);
+}
+
+function runFreeCadStlToStepConversion(freeCadRuntime, inputPath, outputPath) {
+  return new Promise((resolve, reject) => {
+    const commandArgs = [...(freeCadRuntime.args || []), stepConverterScript, inputPath, outputPath];
+    const processHandle = spawn(freeCadRuntime.executable, commandArgs, {
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+
+    const stdoutChunks = [];
+    const stderrChunks = [];
+
+    processHandle.stdout.on("data", chunk => stdoutChunks.push(chunk));
+    processHandle.stderr.on("data", chunk => stderrChunks.push(chunk));
+
+    processHandle.on("error", error => reject(error));
+
+    processHandle.on("close", code => {
+      const stdout = Buffer.concat(stdoutChunks).toString("utf8").trim();
+      const stderr = Buffer.concat(stderrChunks).toString("utf8").trim();
+
+      if (code === 0) {
+        resolve({ stdout, stderr });
+        return;
+      }
+
+      const message = stderr || stdout || `FreeCAD exited with code ${code}.`;
+      reject(new Error(message));
+    });
+  });
 }
 
 async function runConversionWithFallback(inputPath, outputPath) {
@@ -556,6 +588,139 @@ async function handleConversion(req, res) {
   }
 }
 
+function runFreeCadParametricConversion(freeCadRuntime, inputPath, outputPath) {
+  return new Promise((resolve, reject) => {
+    const commandArgs = [...(freeCadRuntime.args || []), parametricConverterScript, inputPath, outputPath];
+    const processHandle = spawn(freeCadRuntime.executable, commandArgs, {
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+
+    const stdoutChunks = [];
+    const stderrChunks = [];
+
+    processHandle.stdout.on("data", chunk => stdoutChunks.push(chunk));
+    processHandle.stderr.on("data", chunk => stderrChunks.push(chunk));
+
+    processHandle.on("error", error => reject(error));
+
+    processHandle.on("close", code => {
+      const stdout = Buffer.concat(stdoutChunks).toString("utf8").trim();
+      const stderr = Buffer.concat(stderrChunks).toString("utf8").trim();
+
+      if (code === 0) {
+        resolve({ stdout, stderr });
+        return;
+      }
+
+      const message = stderr || stdout || `FreeCAD exited with code ${code}.`;
+      reject(new Error(message));
+    });
+  });
+}
+
+async function handleStlToStepParametricConversion(req, res) {
+  const incomingName = parseIncomingFilename(req.url);
+  if (!incomingName.toLowerCase().endsWith(".stl")) {
+    sendJson(res, 400, { error: "Only .stl uploads are accepted by this endpoint." });
+    return;
+  }
+
+  const freeCadRuntime = detectFreeCadExecutable();
+  if (!freeCadRuntime.executable) {
+    sendJson(res, 503, {
+      error: "FreeCAD is not available on this server. Install FreeCAD to enable STL→STEP conversion."
+    });
+    return;
+  }
+
+  let tempDir = "";
+  try {
+    const body = await readRequestBody(req);
+    if (!body.length) {
+      sendJson(res, 400, { error: "Upload body is empty." });
+      return;
+    }
+
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "stl-parametric-"));
+    const inputPath = path.join(tempDir, incomingName);
+    const outputName = `${path.basename(incomingName, path.extname(incomingName))}.step`;
+    const outputPath = path.join(tempDir, outputName);
+
+    fs.writeFileSync(inputPath, body);
+    const result = await runFreeCadParametricConversion(freeCadRuntime, inputPath, outputPath);
+
+    if (!exists(outputPath)) {
+      throw new Error("The converter did not produce a STEP output file.");
+    }
+
+    const outputBuffer = fs.readFileSync(outputPath);
+    const usedAnalytical = result.stdout.includes("using analytical solid");
+
+    sendBinary(res, 200, "model/step", outputBuffer, outputName, {
+      "X-Converter-Method": "freecad-parametric",
+      "X-Analytical-Surfaces": usedAnalytical ? "true" : "false"
+    });
+  } catch (error) {
+    sendJson(res, 500, {
+      error: `STL to STEP (parametric) conversion failed: ${error.message}`
+    });
+  } finally {
+    if (tempDir && exists(tempDir)) {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  }
+}
+
+async function handleStlToStepConversion(req, res) {
+  const incomingName = parseIncomingFilename(req.url);
+  if (!incomingName.toLowerCase().endsWith(".stl")) {
+    sendJson(res, 400, { error: "Only .stl uploads are accepted by this endpoint." });
+    return;
+  }
+
+  const freeCadRuntime = detectFreeCadExecutable();
+  if (!freeCadRuntime.executable) {
+    sendJson(res, 503, {
+      error: "FreeCAD is not available on this server. Install FreeCAD to enable STL→STEP conversion."
+    });
+    return;
+  }
+
+  let tempDir = "";
+  try {
+    const body = await readRequestBody(req);
+    if (!body.length) {
+      sendJson(res, 400, { error: "Upload body is empty." });
+      return;
+    }
+
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "stl-to-step-"));
+    const inputPath = path.join(tempDir, incomingName);
+    const outputName = `${path.basename(incomingName, path.extname(incomingName))}.step`;
+    const outputPath = path.join(tempDir, outputName);
+
+    fs.writeFileSync(inputPath, body);
+    await runFreeCadStlToStepConversion(freeCadRuntime, inputPath, outputPath);
+
+    if (!exists(outputPath)) {
+      throw new Error("The converter did not produce a STEP output file.");
+    }
+
+    const outputBuffer = fs.readFileSync(outputPath);
+    sendBinary(res, 200, "model/step", outputBuffer, outputName, {
+      "X-Converter-Method": "freecad"
+    });
+  } catch (error) {
+    sendJson(res, 500, {
+      error: `STL to STEP conversion failed: ${error.message}`
+    });
+  } finally {
+    if (tempDir && exists(tempDir)) {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  }
+}
+
 async function handleOnshapePartStudioExport(req, res) {
   try {
     const bodyBuffer = await readRequestBody(req);
@@ -635,6 +800,16 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (req.method === "POST" && req.url.startsWith("/api/convert/stl-to-step-parametric")) {
+    await handleStlToStepParametricConversion(req, res);
+    return;
+  }
+
+  if (req.method === "POST" && req.url.startsWith("/api/convert/stl-to-step")) {
+    await handleStlToStepConversion(req, res);
+    return;
+  }
+
   if (req.method === "POST" && req.url === "/api/convert/onshape/partstudio-to-stl") {
     await handleOnshapePartStudioExport(req, res);
     return;
@@ -646,6 +821,8 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, HOST, () => {
   console.log(`[converter] listening on http://${HOST}:${PORT}`);
   console.log("[converter] endpoint: POST /api/convert/sldprt-to-stl?filename=<name>.sldprt");
+  console.log("[converter] endpoint: POST /api/convert/stl-to-step?filename=<name>.stl");
+  console.log("[converter] endpoint: POST /api/convert/stl-to-step-parametric?filename=<name>.stl");
   console.log("[converter] endpoint: POST /api/convert/onshape/partstudio-to-stl");
   console.log("[converter] health: GET /api/health");
   console.log(`[converter] cloudconvert fallback: ${CLOUDCONVERT_API_KEY ? "enabled" : "disabled"}`);

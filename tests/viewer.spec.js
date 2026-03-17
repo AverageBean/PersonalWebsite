@@ -1,3 +1,4 @@
+const fs   = require("fs");
 const path = require("path");
 const { test, expect } = require("@playwright/test");
 
@@ -388,4 +389,113 @@ test("non-uniform scale: unchecking Uniform applies scale to a single axis only"
 
   // Scale display should show "—" (mixed scales).
   await expect(page.locator("#scaleDisplay")).toHaveText("—");
+});
+
+// ── Parametric STEP export tests (2026-03-17) ────────────────────────────────
+
+const RUN_DATE_PARAMETRIC = "2026-03-17";
+const CONVERTER_URL = "http://127.0.0.1:8090";
+
+async function converterIsRunning(request) {
+  try {
+    const r = await request.get(`${CONVERTER_URL}/api/health`, { timeout: 3000 });
+    return r.ok();
+  } catch (_) {
+    return false;
+  }
+}
+
+test("STEP analytical surfaces option appears in export dropdown", async ({ page }) => {
+  const options = await page.locator("#exportFormat option").allInnerTexts();
+  const hasParametric = options.some(o => o.toLowerCase().includes("analytical"));
+  expect(hasParametric).toBe(true);
+});
+
+test("STEP analytical surfaces hint text is shown when option is selected", async ({ page }) => {
+  await page.setInputFiles("#fileInput", {
+    name: "tiny.stl",
+    mimeType: "model/stl",
+    buffer: Buffer.from(`solid tiny
+facet normal 0 0 1
+  outer loop
+    vertex 0 0 0
+    vertex 20 0 0
+    vertex 0 20 0
+  endloop
+endfacet
+endsolid tiny`)
+  });
+
+  await expect(page.locator("#fileName")).toHaveText("tiny.stl", { timeout: 10000 });
+  await page.locator("#exportFormat").selectOption("step-parametric");
+  const hint = await page.locator("#exportHint").innerText();
+  expect(hint.toLowerCase()).toContain("analytical");
+});
+
+test("MeshRing1 parametric STEP: converter returns valid STEP with cylindrical surfaces", async ({ page, request }) => {
+  if (!(await converterIsRunning(request))) {
+    test.skip(true, "Converter service not running — start with: npm run convert:start");
+    return;
+  }
+
+  const stlBuffer = fs.readFileSync(path.join(TESTDOCS_DIR, "MeshRing1.stl"));
+
+  const response = await request.post(
+    `${CONVERTER_URL}/api/convert/stl-to-step-parametric?filename=MeshRing1.stl`,
+    {
+      headers: { "Content-Type": "application/octet-stream" },
+      data: stlBuffer,
+      timeout: 90000
+    }
+  );
+
+  expect(response.ok()).toBe(true);
+
+  // Server must confirm analytical surfaces were used.
+  expect(response.headers()["x-analytical-surfaces"]).toBe("true");
+
+  const stepBytes  = await response.body();
+  const stepText   = stepBytes.toString("utf8");
+  const outputPath = path.join(TESTOUTPUT_DIR, `${RUN_DATE_PARAMETRIC}_MeshRing1_parametric.step`);
+  fs.writeFileSync(outputPath, stepBytes);
+
+  // Valid STEP envelope.
+  expect(stepText.startsWith("ISO-10303-21")).toBe(true);
+
+  // Must contain at least 2 CYLINDRICAL_SURFACE entities (outer + inner cylinder).
+  const cylCount = (stepText.match(/CYLINDRICAL_SURFACE/g) || []).length;
+  expect(cylCount).toBeGreaterThanOrEqual(2);
+
+  // Must NOT be thousands of lines (triangulated STEP for a ring would be ~20 000+ lines).
+  const lineCount = stepText.split("\n").length;
+  expect(lineCount).toBeLessThan(500);
+});
+
+test("MeshRing1 loads in viewer and shows expected bounding box dimensions", async ({ page }) => {
+  const stlPath = path.join(TESTDOCS_DIR, "MeshRing1.stl");
+
+  await page.setInputFiles("#fileInput", stlPath);
+  await expect(page.locator("#fileName")).toContainText("MeshRing1", { timeout: 15000 });
+  await expect(page.locator("#triangleCount")).not.toHaveText("0");
+
+  // Ring is 50 mm diameter × 6 mm tall.
+  // dimX and dimY should be ~50 mm; dimZ should be ~6 mm.
+  await page.waitForTimeout(600);
+
+  const dimX = parseFloat(await page.locator("#dimX").inputValue());
+  const dimY = parseFloat(await page.locator("#dimY").inputValue());
+  const dimZ = parseFloat(await page.locator("#dimZ").inputValue());
+
+  expect(dimX).toBeGreaterThan(45);
+  expect(dimX).toBeLessThan(55);
+  expect(dimY).toBeGreaterThan(45);
+  expect(dimY).toBeLessThan(55);
+  expect(dimZ).toBeGreaterThan(4);
+  expect(dimZ).toBeLessThan(8);
+
+  await expect(page.locator("#statusMessage")).not.toContainText("failed");
+
+  await page.locator(".viewer-panel").screenshot({
+    path: path.join(TESTOUTPUT_DIR, `${RUN_DATE_PARAMETRIC}_MeshRing1_viewer.png`)
+  });
 });

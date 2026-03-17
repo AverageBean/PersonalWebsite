@@ -81,6 +81,23 @@ document.addEventListener("DOMContentLoaded", () => {
       extension: "glb",
       mime: "model/gltf-binary",
       requires: () => Boolean(THREE.GLTFExporter)
+    },
+    step: {
+      extension: "step",
+      mime: "model/step",
+      requires: () => true,
+      hint: "Requires the local converter service (npm run convert:start). "
+        + "Produces a solid body importable into Onshape and FreeCAD. "
+        + "Faces follow the original triangles — not parametric."
+    },
+    "step-parametric": {
+      extension: "step",
+      mime: "model/step",
+      requires: () => true,
+      hint: "Requires the local converter service (npm run convert:start). "
+        + "Detects cylinders and planes via RANSAC and reconstructs them as "
+        + "analytical surfaces. Best on prismatic/machined parts. "
+        + "Falls back to triangulated STEP for complex regions."
     }
   };
 
@@ -284,7 +301,7 @@ document.addEventListener("DOMContentLoaded", () => {
       return;
     }
 
-    exportHint.textContent = `Download the loaded model as .${exportConfig.extension}.`;
+    exportHint.textContent = exportConfig.hint || `Download the loaded model as .${exportConfig.extension}.`;
   }
 
   function resetCameraToBounds() {
@@ -1023,6 +1040,33 @@ document.addEventListener("DOMContentLoaded", () => {
     return response.arrayBuffer();
   }
 
+  async function convertStlBlobToStep(stlBlob, filename, endpoint = "/api/convert/stl-to-step") {
+    const url = `${CONVERTER_API_BASE}${endpoint}?filename=${encodeURIComponent(filename)}`;
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/octet-stream" },
+      body: stlBlob
+    });
+
+    if (!response.ok) {
+      let details = "The converter service rejected the file.";
+      try {
+        const payload = await response.json();
+        if (payload && payload.error) {
+          details = payload.error;
+        }
+      } catch (_) {
+        const fallbackText = await response.text();
+        if (fallbackText) {
+          details = fallbackText;
+        }
+      }
+      throw new Error(details);
+    }
+
+    return response.arrayBuffer();
+  }
+
   function getFriendlySldprtErrorMessage(rawMessage) {
     const message = String(rawMessage || "").trim();
     const normalized = message.toLowerCase();
@@ -1171,6 +1215,25 @@ document.addEventListener("DOMContentLoaded", () => {
       });
     }
 
+    if (formatKey === "step" || formatKey === "step-parametric") {
+      const scaledGeom = buildScaledExportGeometry();
+      const exportMesh = scaledGeom
+        ? new THREE.Mesh(scaledGeom, currentFillMesh.material)
+        : currentFillMesh;
+      const exporter = new THREE.STLExporter();
+      const stlContent = exporter.parse(exportMesh, { binary: false });
+      if (scaledGeom) {
+        scaledGeom.dispose();
+      }
+      const stlBlob = new Blob([stlContent], { type: "model/stl" });
+      const stem = sanitizeFileStem(currentFileStem);
+      const endpoint = formatKey === "step-parametric"
+        ? "/api/convert/stl-to-step-parametric"
+        : "/api/convert/stl-to-step";
+      const arrayBuffer = await convertStlBlobToStep(stlBlob, `${stem}.stl`, endpoint);
+      return new Blob([arrayBuffer], { type: EXPORT_FORMATS.step.mime });
+    }
+
     throw new Error("Unsupported export format.");
   }
 
@@ -1186,6 +1249,14 @@ document.addEventListener("DOMContentLoaded", () => {
     if (!exportConfig.requires()) {
       setStatus(`.${exportConfig.extension} export is unavailable in this browser session.`);
       return;
+    }
+
+    if (formatKey === "step" || formatKey === "step-parametric") {
+      setStatus(
+        formatKey === "step-parametric"
+          ? "Detecting surfaces and building parametric STEP…"
+          : "Converting to STEP via converter service…"
+      );
     }
 
     try {

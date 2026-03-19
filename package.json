@@ -10,7 +10,7 @@
   "author": "Joseph Berryman <JosephBBerryman@gmail.com>",
   "scripts": {
     "test": "npm run test:e2e",
-    "start": "webpack serve --hot --config webpack.config.dev.js",
+    "start": "node start-dev.js",
     "build": "webpack --config webpack.config.prod.js",
     "pw:install": "playwright install chromium",
     "test:e2e": "playwright test",

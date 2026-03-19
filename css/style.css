@@ -467,6 +467,28 @@ body {
   border: 1px solid var(--border);
   border-radius: 10px;
   padding: 0.6rem 0.75rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.conversion-spinner {
+  display: inline-block;
+  width: 13px;
+  height: 13px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.75s linear infinite;
+  flex-shrink: 0;
+}
+
+.conversion-spinner[hidden] {
+  display: none;
 }
 
 .export-panel {
@@ -510,6 +532,46 @@ body {
   margin: 0;
   color: var(--text-soft);
   font-size: 0.86rem;
+}
+
+.conversion-result {
+  border-top: 1px solid var(--border);
+  padding-top: 0.45rem;
+  display: grid;
+  gap: 0.2rem;
+}
+
+.conversion-result-stats {
+  margin: 0;
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 0.15rem 0.5rem;
+  color: var(--text-soft);
+  font-size: 0.86rem;
+}
+
+.conversion-result-stats span {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.4rem;
+}
+
+.conversion-result-stats strong {
+  color: var(--text-main);
+}
+
+.conversion-result-mode {
+  margin: 0.25rem 0 0;
+  font-size: 0.86rem;
+  color: var(--text-soft);
+}
+
+.conversion-result-mode.is-analytical {
+  color: var(--accent);
+}
+
+.conversion-result[hidden] {
+  display: none;
 }
 
 @media (max-width: 1080px) {

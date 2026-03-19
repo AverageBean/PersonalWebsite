@@ -18,14 +18,16 @@ Interactive browser-based 3D model viewer powered by Three.js r128.
 - **Triangle refinement slider** — 0.10x–16.00x; hard cap at 2,000,000 triangles; 140 ms debounce
 - **Uniform scale** — ½× and 2× buttons in the viewer overlay; persists across refinement rebuilds, resets on new file load; scale baked into export
 - **Minimize footprint** — tests all 6 cardinal orientations and reorients the model to the smallest XZ bounding-box area (print-bed optimization); baked into base geometry
-- **Model export** — STL, OBJ, GLB download (current scale baked into exported vertices)
+- **Model export** — STL, OBJ, GLB, STEP (CAD solid), STEP (analytical surfaces) download (current scale baked into exported vertices)
+- **Conversion spinner** — animated indicator in the status bar while STEP conversion is running; export button disabled during conversion to prevent double-submit
 - **Metrics panel** — filename, triangle count, bounding-box size (mm) at current scale
 - **Camera reset** — fits model to view or resets to default empty-scene pose
 
-### SLDPRT Converter Service (`tools/converter-server.js`)
-Local HTTP server providing SLDPRT→STL conversion.
+### SLDPRT / STEP Converter Service (`tools/converter-server.js`)
+Local HTTP server providing SLDPRT→STL and STL→STEP conversion.
 
-- Start: `npm run convert:start` → `http://127.0.0.1:8090`
+- **Auto-started** by `npm start` via `start-dev.js` — no separate terminal needed
+- Manual start: `npm run convert:start` → `http://127.0.0.1:8090`
 - Primary: FreeCAD (auto-detected; override with `FREECAD_CMD` env var)
 - Fallback: CloudConvert (requires `CLOUDCONVERT_API_KEY` env var)
 
@@ -53,9 +55,9 @@ Onshape export requires `ONSHAPE_ACCESS_KEY` and `ONSHAPE_SECRET_KEY` env vars.
 
 ```powershell
 npm install          # install dependencies
-npm start            # dev server (hot reload) → http://127.0.0.1:8081
+npm start            # dev server + converter service together → :8081 / :8090
 npm run build        # production build → dist/
-npm run convert:start  # start SLDPRT converter → http://127.0.0.1:8090
+npm run convert:start  # start converter service standalone → http://127.0.0.1:8090
 ```
 
 ### Testing (Playwright)

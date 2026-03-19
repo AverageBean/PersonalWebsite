@@ -79,7 +79,7 @@
           <option value="solid">Solid Fill</option>
           <option value="overlay">Solid + Triangle Lines</option>
           <option value="wireframe">Triangle Lines Only</option>
-          <option value="flat">Flat Shaded</option>
+          <option value="flat" selected>Flat Shaded</option>
         </select>
       </label>
       <label class="control-field control-color" for="partColor">
@@ -193,7 +193,7 @@
     <p class="usage-tip" id="usageTip">
       Rotation: left-click + drag. Pan: right-click + drag. Zoom: scroll wheel.
     </p>
-    <p class="status-message" id="statusMessage">Viewer ready. Drop an STL or SLDPRT file to begin.</p>
+    <p class="status-message" id="statusMessage"><span class="conversion-spinner" id="conversionSpinner" hidden></span><span id="statusText">Viewer ready. Drop an STL or SLDPRT file to begin.</span></p>
     <section class="export-panel" aria-label="Model export">
       <div class="export-row">
         <label class="control-field" for="exportFormat">
@@ -209,6 +209,19 @@
         <button id="downloadExportButton" type="button" disabled>Download Export</button>
       </div>
       <p class="export-hint" id="exportHint">Load a model to enable export downloads.</p>
+      <div class="conversion-result" id="conversionResult" hidden>
+        <p class="conversion-result-stats">
+          <span>Cyl faces <strong id="crPctCyl">—</strong></span>
+          <span>Plane faces <strong id="crPctPlane">—</strong></span>
+          <span>Fillet/other <strong id="crPctFillet">—</strong></span>
+        </p>
+        <p class="conversion-result-stats">
+          <span>Cylinders <strong id="crCylinders">—</strong></span>
+          <span>Planes <strong id="crPlanes">—</strong></span>
+          <span>Coverage <strong id="crCoverage">—</strong></span>
+        </p>
+        <p class="conversion-result-mode" id="crMode"></p>
+      </div>
     </section>
   </section>
 </main>

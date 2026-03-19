@@ -67,12 +67,14 @@ function sendJson(res, statusCode, payload) {
 }
 
 function sendBinary(res, statusCode, contentType, data, fileName, extraHeaders = {}) {
+  const extraKeys = Object.keys(extraHeaders).join(", ");
   res.writeHead(statusCode, {
     "Content-Type": contentType,
     "Content-Length": data.length,
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type",
+    "Access-Control-Expose-Headers": extraKeys,
     "Content-Disposition": `attachment; filename="${fileName}"`,
     ...extraHeaders
   });
@@ -656,9 +658,32 @@ async function handleStlToStepParametricConversion(req, res) {
     const outputBuffer = fs.readFileSync(outputPath);
     const usedAnalytical = result.stdout.includes("using analytical solid");
 
+    const coverageMatch = result.stdout.match(/coverage=(\d+\.?\d*)%/);
+    const cylMatch      = result.stdout.match(/\((\d+) cyl,/);
+    const planeMatch    = result.stdout.match(/(\d+) plane\)/);
+
+    const totalMatch  = result.stdout.match(/loaded (\d+) triangles/);
+    const horizMatch  = result.stdout.match(/(\d+) horiz \(cyl\)/);
+    const vertMatch   = result.stdout.match(/(\d+) vert \(plane\)/);
+    const filletMatch = result.stdout.match(/(\d+) fillet\/other/);
+
+    function pct(count, total) {
+      return (total > 0) ? ((count / total) * 100).toFixed(1) : "";
+    }
+    const total  = totalMatch  ? Number(totalMatch[1])  : 0;
+    const horiz  = horizMatch  ? Number(horizMatch[1])  : 0;
+    const vert   = vertMatch   ? Number(vertMatch[1])   : 0;
+    const fillet = filletMatch ? Number(filletMatch[1]) : 0;
+
     sendBinary(res, 200, "model/step", outputBuffer, outputName, {
-      "X-Converter-Method": "freecad-parametric",
-      "X-Analytical-Surfaces": usedAnalytical ? "true" : "false"
+      "X-Converter-Method":    "freecad-parametric",
+      "X-Analytical-Surfaces": usedAnalytical ? "true" : "false",
+      "X-Coverage":            coverageMatch ? coverageMatch[1] : "",
+      "X-Detected-Cylinders":  cylMatch      ? cylMatch[1]      : "",
+      "X-Detected-Planes":     planeMatch    ? planeMatch[1]    : "",
+      "X-Pct-Cyl":             pct(horiz,  total),
+      "X-Pct-Plane":           pct(vert,   total),
+      "X-Pct-Fillet":          pct(fillet, total)
     });
   } catch (error) {
     sendJson(res, 500, {

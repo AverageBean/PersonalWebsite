@@ -4,6 +4,8 @@ document.addEventListener("DOMContentLoaded", () => {
   const fileInput = document.getElementById("fileInput");
   const resetCameraButton = document.getElementById("resetCameraButton");
   const statusMessage = document.getElementById("statusMessage");
+  const statusText = document.getElementById("statusText");
+  const conversionSpinner = document.getElementById("conversionSpinner");
   const fileNameOutput = document.getElementById("fileName");
   const triangleCountOutput = document.getElementById("triangleCount");
   const dimXInput = document.getElementById("dimX");
@@ -23,6 +25,14 @@ document.addEventListener("DOMContentLoaded", () => {
   const exportFormatSelect = document.getElementById("exportFormat");
   const downloadExportButton = document.getElementById("downloadExportButton");
   const exportHint = document.getElementById("exportHint");
+  const conversionResult  = document.getElementById("conversionResult");
+  const crPctCyl          = document.getElementById("crPctCyl");
+  const crPctPlane        = document.getElementById("crPctPlane");
+  const crPctFillet       = document.getElementById("crPctFillet");
+  const crCylinders       = document.getElementById("crCylinders");
+  const crPlanes          = document.getElementById("crPlanes");
+  const crCoverage        = document.getElementById("crCoverage");
+  const crMode            = document.getElementById("crMode");
   const scaleHalfBtn = document.getElementById("scaleHalfBtn");
   const scaleDoubleBtn = document.getElementById("scaleDoubleBtn");
   const scaleDisplay = document.getElementById("scaleDisplay");
@@ -30,7 +40,7 @@ document.addEventListener("DOMContentLoaded", () => {
   const uniformScaleCheckbox = document.getElementById("uniformScaleCheckbox");
 
   if (!window.THREE || !THREE.OrbitControls || !THREE.STLLoader) {
-    statusMessage.textContent = "Three.js failed to load. Check your internet connection and refresh.";
+    statusText.textContent = "Three.js failed to load. Check your internet connection and refresh.";
     return;
   }
 
@@ -165,7 +175,7 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   function setStatus(message) {
-    statusMessage.textContent = message;
+    statusText.textContent = message;
   }
 
   function getFileExtension(fileName) {
@@ -386,12 +396,17 @@ document.addEventListener("DOMContentLoaded", () => {
       currentFillMesh.geometry.dispose();
     }
 
+    if (currentWireMesh && currentWireMesh.geometry) {
+      currentWireMesh.geometry.dispose();
+    }
+
     currentModelRoot = null;
     currentFillMesh = null;
     currentWireMesh = null;
     currentEdgeLines = null;
     currentBounds = null;
     savedLocalBounds = null;
+    conversionResult.hidden = true;
     updateExportUiState();
     updateTransformRowState();
   }
@@ -619,6 +634,67 @@ document.addEventListener("DOMContentLoaded", () => {
     scaleX = scaleY = scaleZ = 1.0;
     rebuildModelFromSettings();
     setStatus("Model reoriented to minimize XZ footprint.");
+  }
+
+  // Crease angle for smooth-shading: faces whose dihedral exceeds this will
+  // NOT share vertex normals, eliminating the "black large triangle" artefact
+  // that occurs when a big flat face is vertex-merged with adjacent fillet faces.
+  const CREASE_COS = Math.cos(Math.PI * 40 / 180); // 40°
+
+  function applyCreaseNormals(nonIndexedGeometry) {
+    const position = nonIndexedGeometry.getAttribute("position");
+    const faceCount = position.count / 3;
+    const precision = 1e5;
+
+    // Compute one face normal per triangle.
+    const faceNormals = new Array(faceCount);
+    const vA = new THREE.Vector3(), vB = new THREE.Vector3(), vC = new THREE.Vector3();
+    const e1 = new THREE.Vector3(), e2 = new THREE.Vector3();
+    for (let fi = 0; fi < faceCount; fi++) {
+      vA.fromBufferAttribute(position, fi * 3);
+      vB.fromBufferAttribute(position, fi * 3 + 1);
+      vC.fromBufferAttribute(position, fi * 3 + 2);
+      e1.subVectors(vC, vB);
+      e2.subVectors(vA, vB);
+      e1.cross(e2).normalize();
+      faceNormals[fi] = e1.clone();
+    }
+
+    // Map each 3-D position (rounded) to all face indices that touch it.
+    const posFaces = new Map();
+    for (let vi = 0; vi < position.count; vi++) {
+      const key =
+        Math.round(position.getX(vi) * precision) + "_" +
+        Math.round(position.getY(vi) * precision) + "_" +
+        Math.round(position.getZ(vi) * precision);
+      if (!posFaces.has(key)) posFaces.set(key, []);
+      posFaces.get(key).push(Math.floor(vi / 3));
+    }
+
+    // For each vertex slot, average only the face normals within the crease angle.
+    const normals = new Float32Array(position.count * 3);
+    const avg = new THREE.Vector3();
+    for (let vi = 0; vi < position.count; vi++) {
+      const fi = Math.floor(vi / 3);
+      const myN = faceNormals[fi];
+      const key =
+        Math.round(position.getX(vi) * precision) + "_" +
+        Math.round(position.getY(vi) * precision) + "_" +
+        Math.round(position.getZ(vi) * precision);
+      avg.set(0, 0, 0);
+      for (const adjFi of posFaces.get(key)) {
+        if (faceNormals[adjFi].dot(myN) >= CREASE_COS) {
+          avg.add(faceNormals[adjFi]);
+        }
+      }
+      avg.normalize();
+      normals[vi * 3]     = avg.x;
+      normals[vi * 3 + 1] = avg.y;
+      normals[vi * 3 + 2] = avg.z;
+    }
+
+    nonIndexedGeometry.setAttribute("normal", new THREE.Float32BufferAttribute(normals, 3));
+    return nonIndexedGeometry;
   }
 
   function ensureIndexedGeometry(geometry) {
@@ -876,7 +952,11 @@ document.addEventListener("DOMContentLoaded", () => {
       color: 0x0c3142
     });
 
-    currentFillMesh = new THREE.Mesh(geometry, fillMaterial);
+    // Fill mesh uses non-indexed geometry with crease-angle normals so that
+    // hard edges (flat face ↔ cylinder/fillet) stay sharp while smooth regions
+    // interpolate correctly. Wire/edge meshes keep the indexed geometry.
+    const fillGeometry = applyCreaseNormals(geometry.toNonIndexed());
+    currentFillMesh = new THREE.Mesh(fillGeometry, fillMaterial);
     currentWireMesh = new THREE.Mesh(geometry, wireMaterial);
     currentEdgeLines = new THREE.LineSegments(new THREE.EdgesGeometry(geometry, 24), edgeMaterial);
 
@@ -899,7 +979,7 @@ document.addEventListener("DOMContentLoaded", () => {
     scene.add(currentModelRoot);
     currentFileStem = stripFileExtension(fileName || "model");
 
-    applyViewStyle(viewStyleSelect.value || "solid");
+    applyViewStyle(viewStyleSelect.value || "flat");
     updateMetrics(fileName, geometry);
     updateExportUiState();
     updateTransformRowState();
@@ -1064,7 +1144,17 @@ document.addEventListener("DOMContentLoaded", () => {
       throw new Error(details);
     }
 
-    return response.arrayBuffer();
+    const meta = {
+      analytical:  response.headers.get("X-Analytical-Surfaces") === "true",
+      coverage:    response.headers.get("X-Coverage")           || null,
+      cylinders:   response.headers.get("X-Detected-Cylinders") || null,
+      planes:      response.headers.get("X-Detected-Planes")    || null,
+      pctCyl:      response.headers.get("X-Pct-Cyl")            || null,
+      pctPlane:    response.headers.get("X-Pct-Plane")          || null,
+      pctFillet:   response.headers.get("X-Pct-Fillet")         || null
+    };
+
+    return { buffer: await response.arrayBuffer(), meta };
   }
 
   function getFriendlySldprtErrorMessage(rawMessage) {
@@ -1230,8 +1320,8 @@ document.addEventListener("DOMContentLoaded", () => {
       const endpoint = formatKey === "step-parametric"
         ? "/api/convert/stl-to-step-parametric"
         : "/api/convert/stl-to-step";
-      const arrayBuffer = await convertStlBlobToStep(stlBlob, `${stem}.stl`, endpoint);
-      return new Blob([arrayBuffer], { type: EXPORT_FORMATS.step.mime });
+      const { buffer, meta } = await convertStlBlobToStep(stlBlob, `${stem}.stl`, endpoint);
+      return { blob: new Blob([buffer], { type: EXPORT_FORMATS.step.mime }), meta };
     }
 
     throw new Error("Unsupported export format.");
@@ -1251,16 +1341,25 @@ document.addEventListener("DOMContentLoaded", () => {
       return;
     }
 
-    if (formatKey === "step" || formatKey === "step-parametric") {
+    const isStepExport = formatKey === "step" || formatKey === "step-parametric";
+
+    if (isStepExport) {
       setStatus(
         formatKey === "step-parametric"
           ? "Detecting surfaces and building parametric STEP…"
           : "Converting to STEP via converter service…"
       );
+      conversionSpinner.hidden = false;
+      conversionResult.hidden = true;
+      downloadExportButton.disabled = true;
     }
 
     try {
-      const blob = await createExportBlob(formatKey);
+      const result = await createExportBlob(formatKey);
+      // STEP returns {blob, meta}; all other formats return a Blob directly.
+      const blob = result instanceof Blob ? result : result.blob;
+      const meta = result instanceof Blob ? null : (result.meta || null);
+
       const objectUrl = URL.createObjectURL(blob);
       const anchor = document.createElement("a");
       anchor.href = objectUrl;
@@ -1269,10 +1368,38 @@ document.addEventListener("DOMContentLoaded", () => {
       anchor.click();
       anchor.remove();
       URL.revokeObjectURL(objectUrl);
+
       setStatus(`Exported ${anchor.download}.`);
+
+      if (meta && meta.coverage) {
+        crPctCyl.textContent    = meta.pctCyl    ? meta.pctCyl    + "%" : "—";
+        crPctPlane.textContent  = meta.pctPlane  ? meta.pctPlane  + "%" : "—";
+        crPctFillet.textContent = meta.pctFillet ? meta.pctFillet + "%" : "—";
+        crCylinders.textContent = meta.cylinders || "—";
+        crPlanes.textContent    = meta.planes    || "—";
+        crCoverage.textContent  = meta.coverage + "%";
+        if (meta.analytical) {
+          crMode.textContent  = "Analytical surfaces";
+          crMode.className    = "conversion-result-mode is-analytical";
+        } else {
+          crMode.textContent  = "Triangulated fallback (coverage below threshold)";
+          crMode.className    = "conversion-result-mode";
+        }
+        conversionResult.hidden = false;
+        conversionResult.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      }
     } catch (error) {
       console.error(error);
-      setStatus(`Export failed: ${error.message}`);
+      const msg = String(error.message || "").toLowerCase();
+      const friendlyError = (isStepExport && msg.includes("failed to fetch"))
+        ? `Converter service not reachable at ${CONVERTER_API_BASE}. Restart the dev server with npm start.`
+        : error.message;
+      setStatus(`Export failed: ${friendlyError}`);
+    } finally {
+      if (isStepExport) {
+        conversionSpinner.hidden = true;
+        downloadExportButton.disabled = false;
+      }
     }
   }
 

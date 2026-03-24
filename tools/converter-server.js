@@ -649,7 +649,16 @@ async function handleStlToStepParametricConversion(req, res) {
     const outputPath = path.join(tempDir, outputName);
 
     fs.writeFileSync(inputPath, body);
-    const result = await runFreeCadParametricConversion(freeCadRuntime, inputPath, outputPath);
+    console.log(`[parametric] starting conversion: ${incomingName}`);
+    let result;
+    try {
+      result = await runFreeCadParametricConversion(freeCadRuntime, inputPath, outputPath);
+    } catch (convErr) {
+      console.error("[parametric] FreeCAD process failed:\n" + convErr.message);
+      throw convErr;
+    }
+    console.log("[parametric stdout]\n" + result.stdout);
+    if (result.stderr) console.error("[parametric stderr]\n" + result.stderr);
 
     if (!exists(outputPath)) {
       throw new Error("The converter did not produce a STEP output file.");

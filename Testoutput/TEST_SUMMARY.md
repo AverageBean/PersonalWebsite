@@ -53,6 +53,30 @@ Multiple viewer features lacked Playwright coverage: camera reset button, grid/b
 
 ---
 
+## Rotation Controls and Footprint Fix
+**Date:** 2026-03-31
+**Status:** Resolved
+**Active:** none (no visual artifacts)
+
+### Problem
+Two issues addressed together:
+1. Footprint feature was inverted — selecting the smallest XZ area instead of the largest, causing baseplates to stand on their thin edge rather than lie flat for 3D printing.
+2. No rotation controls existed — users had no way to manually orient geometry before export.
+
+### Tests Used
+`tests/viewer-controls.spec.js` — 6 rotation tests added (21 total in file), Chromium:
+- Rotate toggle button disabled when no model is loaded
+- Rotate toggle shows/hides rotation input row
+- Apply rotation changes model dimensions (verifies geometry is actually rotated)
+- Enter key in rotation input triggers apply
+- Reset button clears all rotation inputs to 0
+- Rotation row hides when a new file is loaded
+
+### Interpretation
+6/6 rotation tests passed. Full suite (48 tests across 4 spec files) runs with 47 passed, 1 skipped (converter-dependent parametric STEP). Footprint fix confirmed manually — baseplate now lies on its widest face after pressing the footprint button.
+
+---
+
 Documents each resolved or ongoing issue: the problem, tests used, and interpretation of outcomes.
 Archived artifacts are in `Testoutput/archive/`.
 

@@ -5,12 +5,36 @@ note_for_ai: Don't edit this file without user request/approval. When you do, us
 This document describes project goals/requirements for my PersonalWebsite.
 
 ## Language
-Focus on concise language that efficiently conveys purpose of the documentation to preserve context length.
-Any writing should be written to inform reader quickly without overly verbose language or to provide maximum return on context to agent.
+Write concisely to maximize information density and minimize context cost.
+
+Avoid absolute-claim words: "perfect", "flawless", "exactly", "completely", "fully resolved", "works correctly". Replace with measurable outcomes: pass counts, metric values, specific criteria met or unmet.
+
+## Test Output Summary Format
+
+Each closed or ongoing test run must have a corresponding entry in `Testoutput/TEST_SUMMARY.md`. Use this structure:
+
+```
+## <Issue Title>
+**Date:** YYYY-MM-DD
+**Status:** Resolved | Ongoing | Regression check
+**Active:** <active artifact filenames, if any>
+**Archive:** <archived artifact filenames>
+
+### Problem
+What failed or was being verified, and why.
+
+### Tests Used
+Test suite name, browser, pass/fail counts; list individual tests if fewer than ~8.
+
+### Interpretation
+What the results indicate. Cite specific metrics. State whether the issue is closed or what remains.
+```
+
+Archived artifacts go to `Testoutput/archive/`. Temp or unlabeled files also belong in archive with a note in the Temp section.
 
 ## Skills
 
-Generate and define new skills when it is determined necessary
+Generate and define new skills when necessary
 
 ### Agents
 

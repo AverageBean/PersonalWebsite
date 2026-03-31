@@ -23,7 +23,7 @@ When generating new tests, store them in `./tests` for future use
 
 .STL, .SLDPRT tests should be done against files found in `./TestDocs`. Never test against newly generated files!
 
-Store test results in `./Testoutput` labeled with date_testname format.
+Store test results in `./Testoutput` labeled with date_testname format. Maintain a log of test output contents in format found in `./specs/reqs.md`. When committing and pushing to git identify outdated outputs and move to archive.
 
 If visual tests are necessary provide png in `./Testoutput`
 
@@ -34,7 +34,7 @@ Appearance should demonstrate professionalism and organization. Avoid flashy des
 
 Prefer metric units (mm,N,cm^3) when implementing UI metrics.
 
-Optimize performance, question whether changes to the website will lower performance and set appropriate constraints on features.
+Optimize performance, question whether changes will lower performance and set appropriate constraints on features.
 - Test simulation upper limits when defined and evaluate performance and responsiveness.
 - Define and remember metrics for determining performance impact.
 - Remember performance limits when they are discovered to prevent repeating issue.

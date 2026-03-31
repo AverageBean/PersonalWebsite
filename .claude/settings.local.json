@@ -1,7 +1,39 @@
 {
   "permissions": {
     "allow": [
-      "Bash(cd \"C:/Users/berry/WebstormProjects/PersonalWebsite\" && npm run test:e2e 2>&1)"
+      "Bash(cd \"C:/Users/berry/WebstormProjects/PersonalWebsite\" && npm run test:e2e 2>&1)",
+      "Bash(npx playwright:*)",
+      "Bash(python --version 2>&1; pip show pythonocc-core 2>&1; pip show pyransac3d 2>&1; pip show trimesh 2>&1)",
+      "Bash(\"C:/Program Files/FreeCAD 1.0/bin/python.exe\" -m pip install pyransac3d trimesh numpy 2>&1 | tail -15)",
+      "Bash(\"C:/Program Files/FreeCAD 1.0/bin/python.exe\" -c \"import trimesh; import pyransac3d; import numpy; print\\('trimesh', trimesh.__version__\\); print\\('pyransac3d', pyransac3d.__version__\\); print\\('numpy', numpy.__version__\\)\" 2>&1)",
+      "Bash(\"C:/Program Files/FreeCAD 1.0/bin/python.exe\" -c \"import trimesh; import pyransac3d; import numpy; print\\('ok'\\)\" 2>&1)",
+      "Bash(\"C:/Program Files/FreeCAD 1.0/bin/python.exe\" \"C:/Users/berry/WebstormProjects/PersonalWebsite/tools/convert-stl-to-step-parametric-with-freecad.py\" \"C:/Users/berry/WebstormProjects/PersonalWebsite/TestDocs/MeshRing1.stl\" \"C:/Users/berry/WebstormProjects/PersonalWebsite/Testoutput/2026-03-17_MeshRing1_parametric.step\" 2>&1)",
+      "Bash(\"C:/Program Files/FreeCAD 1.0/bin/python.exe\" \"C:/Users/berry/WebstormProjects/PersonalWebsite/tools/convert-stl-to-step-parametric-with-freecad.py\" \"C:/Users/berry/WebstormProjects/PersonalWebsite/TestDocs/MeshRing1.stl\" \"C:/Users/berry/WebstormProjects/PersonalWebsite/Testoutput/2026-03-17_MeshRing1_parametric_v2.step\" 2>&1)",
+      "Bash(node --check start-dev.js)",
+      "Bash(cp /tmp/playwright_screenshot.js /c/Users/berry/WebstormProjects/PersonalWebsite/playwright_screenshot.js)",
+      "Bash(node playwright_screenshot.js)",
+      "Bash(netstat -ano)",
+      "Bash(xargs -I{} powershell -command \"Stop-Process -Id {} -Force\")",
+      "Bash(curl -s http://127.0.0.1:8090/api/health)",
+      "Bash(python:*)",
+      "Bash(\"C:/Program Files/FreeCAD 1.0/bin/python.exe\" tools/diagnose-stl-geometry.py \"TestDocs/Station_3_Baseplate - Part 1.stl\" 2>&1)",
+      "Bash(\"C:/Program Files/FreeCAD 1.0/bin/python.exe\" -c \"import sys; sys.stdout.reconfigure\\(encoding=''''utf-8''''\\)\")",
+      "Bash(PYTHONIOENCODING=utf-8 \"C:/Program Files/FreeCAD 1.0/bin/python.exe\" tools/diagnose-stl-geometry.py \"TestDocs/Station_3_Baseplate - Part 1.stl\" 2>&1)",
+      "Bash(\"C:/Program Files/FreeCAD 1.0/bin/python.exe\" tools/diagnose-stl-geometry.py \"TestDocs/Station_3_Baseplate - Part 1.stl\")",
+      "Bash(\"C:/Program Files/FreeCAD 1.0/bin/python.exe\" tools/diagnose-cut-regions.py \"TestDocs/Station_3_Baseplate - Part 1.stl\")",
+      "Bash(\"C:/Program Files/FreeCAD 1.0/bin/python.exe\" tools/test-parametric-step.py)",
+      "Bash(\"C:/Program Files/FreeCAD 1.0/bin/python.exe\" tools/convert-stl-to-step-parametric-with-freecad.py \"TestDocs/MeshRing1.stl\" \"Testoutput/test_meshring1_quick.step\")",
+      "Bash(dir:*)",
+      "Bash(\"C:/Program Files/FreeCAD 1.0/bin/python.exe\" tools/compare-step-to-stl.py \"TestDocs/Station_3_Baseplate - Part 1.stl\" \"Testoutput/2026-03-23_parametric_Station_3_Baseplate_-_Part_1.step\")",
+      "Bash(python -c \":*)",
+      "Bash(\"C:/Program Files/FreeCAD 1.0/bin/python.exe\" -m pip install rtree)",
+      "Bash(\"C:/Program Files/FreeCAD 1.0/bin/python.exe\" tools/slice-stl-profile.py \"TestDocs/Station_3_Baseplate_-_Part_1.stl\" 2>&1)",
+      "Bash(ls:*)",
+      "Bash(\"C:/Program Files/FreeCAD 1.0/bin/python.exe\" tools/slice-stl-profile.py \"TestDocs/Station_3_Baseplate - Part 1.stl\" 2>&1)",
+      "Bash(\"C:/Program Files/FreeCAD 1.0/bin/python.exe\" tools/convert-stl-to-step-parametric-with-freecad.py \"TestDocs/Station_3_Baseplate - Part 1.stl\" \"Testoutput/2026-03-23_baseplate_segmented.step\")",
+      "Bash(\"C:/Program Files/FreeCAD 1.0/bin/python.exe\" tools/compare-step-to-stl.py \"TestDocs/Station_3_Baseplate - Part 1.stl\" \"Testoutput/2026-03-23_baseplate_segmented.step\")",
+      "Bash(cd:*)",
+      "Bash(git:*)"
     ]
   }
 }

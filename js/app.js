@@ -39,6 +39,23 @@ document.addEventListener("DOMContentLoaded", () => {
   const minimizeFootprintBtn = document.getElementById("minimizeFootprintBtn");
   const uniformScaleCheckbox = document.getElementById("uniformScaleCheckbox");
 
+  // ── Tab switching ──────────────────────────────────────────────────────
+  const tabBtns = document.querySelectorAll('.tab-btn');
+  const tabPanes = document.querySelectorAll('.tab-pane');
+  tabBtns.forEach(btn => {
+    btn.addEventListener('click', () => {
+      const target = btn.dataset.tab;
+      tabBtns.forEach(b => {
+        b.classList.toggle('is-active', b === btn);
+        b.setAttribute('aria-selected', String(b === btn));
+      });
+      tabPanes.forEach(p => p.classList.toggle('is-active', p.id === `tab-${target}`));
+      if (target === 'stl-viewer') {
+        window.dispatchEvent(new Event('resize'));
+      }
+    });
+  });
+
   if (!window.THREE || !THREE.OrbitControls || !THREE.STLLoader) {
     statusText.textContent = "Three.js failed to load. Check your internet connection and refresh.";
     return;

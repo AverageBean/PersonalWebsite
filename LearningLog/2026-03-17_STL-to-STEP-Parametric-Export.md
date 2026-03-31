@@ -17,7 +17,7 @@ Both formats require the local converter service (`npm run convert:start`) since
 
 STL is a **triangle mesh format**. It stores geometry as a list of flat triangular facets with no information above the individual triangle level — no edges, no surfaces, no mathematical description of the shape. A cylinder in STL is just 200 triangles arranged in a tube shape.
 
-CAD tools like Onshape operate on **B-rep (Boundary Representation)** geometry. A B-rep solid is defined by surfaces (planes, cylinders, NURBS), connected by topological edges and vertices. When you import an STL into Onshape it lands as a "mesh body" — you can view it but cannot fillet it, boolean it, or use its faces for sketching.
+CAD tools like Onshape operate on **B-rep (Boundary Representation)** geometry. A B-rep solid is defined by surfaces (planes, cylinders, NURBS: non-uniform rational basis splines), connected by topological edges and vertices. When you import an STL into Onshape it lands as a "mesh body" — you can view it but cannot fillet it, boolean it, or use its faces for sketching.
 
 **STEP (ISO-10303)** is the universal neutral CAD exchange format. It can encode B-rep solids. When we export a STEP file where the cylindrical faces are `CYLINDRICAL_SURFACE` entities instead of hundreds of flat triangles, Onshape imports it as a proper solid with smooth, selectable faces.
 
@@ -35,7 +35,7 @@ FreeCAD's `Part.makeShapeFromMesh()` reads each triangle from the STL, creates a
 
 ### Level 2 — Analytical STEP (Phase A of reverse engineering)
 
-The script detects the underlying geometric primitives (cylinders, planes) using RANSAC, then rebuilds the solid using FreeCAD's Part primitives. The result:
+The script detects the underlying geometric primitives (cylinders, planes) using RANSAC (random sample consensus), then rebuilds the solid using FreeCAD's Part primitives. The result:
 
 - True `CYLINDRICAL_SURFACE` geometry — one smooth face per cylinder
 - `PLANE` entities for flat faces — one face per flat region
@@ -136,7 +136,7 @@ hole_base = body_center + body_axis * (h_min - HOLE_CUT_MARGIN)
 hole_solid = Part.makeCylinder(hole["radius"], hole_h, hole_base, body_axis)
 ```
 
-This guarantees perfect coaxiality regardless of how accurately RANSAC found the inner axis.
+This guarantees coaxiality regardless of how accurately RANSAC found the inner axis.
 
 ---
 

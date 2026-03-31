@@ -1,0 +1,155 @@
+# Test Output Summary
+
+## Panel Tab Navigation
+**Date:** 2026-03-25
+**Status:** Resolved
+**Active:** none (no visual artifacts)
+
+### Problem
+The right panel (viewer-panel) had no tab navigation. Adding tabs required verifying that: (a) only the active tab pane is visible, (b) switching tabs correctly updates `aria-selected` and `is-active` state, and (c) returning to STL Viewer restores viewer controls.
+
+### Tests Used
+`tests/panel-tabs.spec.js` — 6 tests, Chromium:
+- Tab bar renders all three tabs (STL Viewer, Bonsai Vitals, Train Spotting)
+- STL Viewer tab is active by default and viewer controls are visible
+- Clicking Bonsai Vitals shows placeholder and hides viewer
+- Clicking Train Spotting shows placeholder and hides viewer
+- Switching back to STL Viewer restores viewer controls
+- Only one tab pane is visible at a time (three-state check across all panes)
+
+### Interpretation
+6/6 passed. Tab switching, ARIA state, and pane visibility all behave as specified. Existing 20-test viewer suite also passes unchanged, confirming no regression to STL Viewer functionality.
+
+---
+
+Documents each resolved or ongoing issue: the problem, tests used, and interpretation of outcomes.
+Archived artifacts are in `Testoutput/archive/`.
+
+---
+
+## Refinement Slider Mesh Holes
+**Date:** 2026-03-12
+**Status:** Resolved
+**Archive:** `archive/2026-03-12_refinement-slider-fix.md`
+
+### Problem
+`buildTriangleSubsetGeometry` used strided triangle sampling that discarded 40–90% of triangles while retaining all vertices. Orphaned vertices and missing faces produced visible holes in the mesh for any slider value that was not exactly 1×, 4×, or 16×.
+
+### Tests Used
+Playwright suite (`tests/viewer.spec.js`) — 5 tests, Chromium:
+- Viewer controls render
+- Background preset change
+- Refinement slider <1× uses base geometry without mesh holes
+- Refinement slider at non-power-of-4 applies subdivision without mesh holes
+- Load STL, switch style, apply slider multiplier
+
+### Interpretation
+5/5 passed after removing the subset-sampling step from `buildRenderableGeometry`. Effective slider behavior is: <1→1×, 1.01–4→4×, 4.01–16→16× (ceil-based subdivision, no intermediate subsampling). Issue closed.
+
+---
+
+## Grid Intersecting Loaded Model
+**Date:** 2026-03-12
+**Status:** Resolved
+**Archive:** `archive/2026-03-12_grid-intersection-fix.md`, `archive/2026-03-12_grid-below-model-default-view.png`, `archive/2026-03-12_grid-below-model-low-angle.png`
+
+### Problem
+`centerGeometryAtOrigin` translated the mesh centroid to world origin (0,0,0). `THREE.GridHelper` sits at Y=0. The lower half of every loaded model (from Y=−h/2 to 0) fell below the grid plane, causing the grid to cut visually through the middle of the part.
+
+### Tests Used
+Playwright suite — 6 tests, Chromium; visual screenshots at default and low-angle camera using `CurvedMinimalPost-Onshape.stl`.
+
+### Interpretation
+6/6 passed. Fix: `currentModelRoot.position.y = -currentBounds.min.y` lifts the model group so its lowest vertex sits at Y=0. `currentBounds` shifted into world space to keep camera framing and size metrics consistent. Screenshots show no grid/model intersection at either camera angle. Issue closed.
+
+---
+
+## Zoom-to-Fit for Micro-Scale Models
+**Date:** 2026-03-12
+**Status:** Resolved
+**Archive:** `archive/2026-03-12_zoom-to-fit-fix.md`, `archive/2026-03-12_zoom-to-fit-micro-model.png`
+
+### Problem
+`resetCameraToBounds` had three hard-coded unit floors (radius min 0.5, camera.near 0.01, controls.minDistance 0.05). For a 0.014-unit model (Onshape metre-unit export) these placed the camera 71× farther than the model, making it occupy ~0.5% of the viewport.
+
+### Tests Used
+Playwright suite — 7 tests, Chromium; visual screenshot of `CurvedMinimalPost-Onshape.stl` after fix.
+
+### Interpretation
+7/7 passed. All three fixed floors replaced with scale-relative values proportional to `fitDistance` and `radius`. Models at normal scale are unaffected (old floors only triggered for sub-millimetre raw coordinates). Screenshot confirms the micro-model fills the viewport. `preserveDrawingBuffer: true` added to the renderer to support pixel-level visual tests — negligible cost for a single-mesh viewer. Issue closed.
+
+---
+
+## Overlay and UI Layout Regression (Post-BBox Button Changes)
+**Date:** 2026-03-13
+**Status:** Regression check — no failures detected
+**Archive:** `archive/2026-03-13_overlay-no-model.png`, `archive/2026-03-13_overlay-with-model.png`
+
+### Problem
+After replacing the dynamic bbox SVG preview with a static cube toggle button and tightening the dimension input area, a visual check was needed to confirm the overlay layout was not broken.
+
+### Tests Used
+Visual screenshots via Playwright: viewer in empty state and with a loaded model.
+
+### Interpretation
+No layout breakage observed in either state. Overlay renders as intended. No follow-up action required.
+
+---
+
+## Crease Normals, Solid Fill Artefact, and Conversion Panel (QoL)
+**Date:** 2026-03-19
+**Status:** Resolved
+**Archive:** `archive/2026-03-19_ui-no-model.png`, `archive/2026-03-19_ui-with-model.png`, `archive/2026-03-19_baseplate-solid-fill-creasefix.png`, `archive/2026-03-19_conversion-result-panel.png`, `archive/2026-03-19_conversion-result-visible.png`
+
+### Problem
+Three issues addressed together:
+1. Large-triangle artefact in Solid Fill mode on `Station_3_Baseplate - Part 1.stl` — crease normals not applied.
+2. No user feedback during or after STEP conversion (no spinner, no result metrics).
+3. Dev server required two separate terminal commands (`npm start` + `npm run convert:start`).
+
+### Tests Used
+Visual screenshots: UI empty state, UI with model loaded, baseplate in solid fill after crease-normal fix, conversion result panel during and after export.
+
+### Interpretation
+Screenshots confirm: crease normal fix eliminates the large-triangle artefact; spinner appears during export; result panel shows metrics (coverage %, volume ratio, Hausdorff) after completion. Dev server auto-start consolidated into `start-dev.js` via `child_process.fork`. All three issues closed.
+
+---
+
+## Parametric STEP Export — MeshRing1
+**Dates:** 2026-03-17 (initial), 2026-03-20 (intermediate), 2026-03-23 (current)
+**Status:** Phase A complete; Phase B (tori) pending
+**Active:** `2026-03-23_parametric_MeshRing1.step`
+**Archive:** `archive/2026-03-17_MeshRing1_parametric.step`, `archive/2026-03-17_MeshRing1_parametric_v2.step`, `archive/2026-03-17_MeshRing1_viewer.png`, `archive/2026-03-20_parametric_MeshRing1.step`
+
+### Problem
+Convert `TestDocs/MeshRing1.stl` to an analytical STEP solid via RANSAC-detected cylinders and planes. Early outputs failed coaxiality checks or had insufficient surface coverage.
+
+### Tests Used
+`tools/test-parametric-step.py` (timeout 240s); `tools/compare-step-to-stl.py` (volume ratio, Hausdorff distance, surface deviation histogram).
+
+### Interpretation
+Phase A (cylinders + planes) meets the ≥57.9% analytical coverage criterion. The 2026-03-17 outputs are early-iteration baselines with lower coverage; the 2026-03-20 output is a mid-iteration intermediate. The 2026-03-23 file is the current baseline for Phase B work (tori for fillet coverage; target ≥95%).
+
+---
+
+## Parametric STEP Export — Baseplate
+**Dates:** 2026-03-20 (initial), 2026-03-23 (segment-aware fix)
+**Status:** Phase A complete (PASS); Phase B pending
+**Active:** `2026-03-23_parametric_Station_3_Baseplate_-_Part_1.step`, `2026-03-23_baseplate_segmented.step`
+**Archive:** `archive/2026-03-20_parametric_Station_3_Baseplate_-_Part_1.step`
+
+### Problem
+Baseplate slot cuts were merging T-head end-face pairs from opposite ends of the part, producing over-long cuts that removed material where none should be removed. Root cause: perpendicular segmentation did not detect the gap between non-contiguous face groups.
+
+### Tests Used
+`tools/test-parametric-step.py`; `tools/compare-step-to-stl.py`; `tools/slice-stl-profile.py` (cross-sections at multiple heights to expose cut geometry).
+
+### Interpretation
+Gap-aware perpendicular segmentation (2026-03-23) splits wall pairs with non-contiguous face centres into separate cuts. Fidelity metrics after fix: vol ratio=0.9925, mean deviation=0.041mm, Hausdorff=0.956mm — all within PASS thresholds. The 2026-03-20 output is retained in archive as a pre-fix baseline for comparison. `2026-03-23_baseplate_segmented.step` records the segmented intermediate geometry used during debugging.
+
+---
+
+## Temp / Unlabeled Outputs
+**Archive:** `archive/tmp_conversion_test.js`, `archive/test_meshring1_quick.step`
+
+Created without date-prefixed naming during exploratory testing. No associated problem statement or result record. Archived rather than deleted in case they are needed for reference.

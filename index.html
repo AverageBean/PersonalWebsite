@@ -56,6 +56,13 @@
   </section>
 
   <section class="panel viewer-panel">
+    <div class="panel-tabs" role="tablist" aria-label="Panel tabs">
+      <button class="tab-btn is-active" role="tab" aria-selected="true" aria-controls="tab-stl-viewer" data-tab="stl-viewer">STL Viewer</button>
+      <button class="tab-btn" role="tab" aria-selected="false" aria-controls="tab-bonsai-vitals" data-tab="bonsai-vitals">Bonsai Vitals</button>
+      <button class="tab-btn" role="tab" aria-selected="false" aria-controls="tab-train-spotting" data-tab="train-spotting">Train Spotting</button>
+    </div>
+
+    <div id="tab-stl-viewer" class="tab-pane is-active" role="tabpanel">
     <div class="viewer-header">
       <div>
         <p class="eyebrow"></p>
@@ -223,6 +230,21 @@
         <p class="conversion-result-mode" id="crMode"></p>
       </div>
     </section>
+    </div><!-- /#tab-stl-viewer -->
+
+    <div id="tab-bonsai-vitals" class="tab-pane" role="tabpanel">
+      <div class="tab-placeholder">
+        <p class="tab-placeholder-title">Bonsai Vitals</p>
+        <p class="tab-placeholder-body">Live sensor monitoring for soil moisture, light, and temperature — coming soon.</p>
+      </div>
+    </div>
+
+    <div id="tab-train-spotting" class="tab-pane" role="tabpanel">
+      <div class="tab-placeholder">
+        <p class="tab-placeholder-title">Train Spotting</p>
+        <p class="tab-placeholder-body">Real-time logging and mapping of train activity — coming soon.</p>
+      </div>
+    </div>
   </section>
 </main>
 

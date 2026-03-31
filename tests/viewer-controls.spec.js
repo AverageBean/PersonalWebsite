@@ -320,3 +320,133 @@ test("export hint updates when format is changed", async ({ page }) => {
   const paramHint = await page.locator("#exportHint").innerText();
   expect(paramHint.toLowerCase()).toContain("analytical");
 });
+
+// ── Rotation controls ───────────────────────────────────────────────────
+
+test("rotation toggle is disabled before load and enabled after", async ({ page }) => {
+  await expect(page.locator("#rotateToggleBtn")).toBeDisabled();
+
+  await page.setInputFiles("#fileInput", {
+    name: "tiny.stl",
+    mimeType: "model/stl",
+    buffer: Buffer.from(tinyStl)
+  });
+  await expect(page.locator("#fileName")).toHaveText("tiny.stl", { timeout: 10000 });
+
+  await expect(page.locator("#rotateToggleBtn")).toBeEnabled();
+});
+
+test("rotation toggle shows and hides the rotation row", async ({ page }) => {
+  await page.setInputFiles("#fileInput", {
+    name: "tiny.stl",
+    mimeType: "model/stl",
+    buffer: Buffer.from(tinyStl)
+  });
+  await expect(page.locator("#fileName")).toHaveText("tiny.stl", { timeout: 10000 });
+
+  // Row hidden by default
+  await expect(page.locator("#rotationRow")).not.toBeVisible();
+  await expect(page.locator("#rotateToggleBtn")).toHaveAttribute("aria-pressed", "false");
+
+  // Click to show
+  await page.locator("#rotateToggleBtn").click();
+  await expect(page.locator("#rotationRow")).toBeVisible();
+  await expect(page.locator("#rotateToggleBtn")).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator("#rotateToggleBtn")).toHaveClass(/is-active/);
+
+  // Click to hide
+  await page.locator("#rotateToggleBtn").click();
+  await expect(page.locator("#rotationRow")).not.toBeVisible();
+  await expect(page.locator("#rotateToggleBtn")).toHaveAttribute("aria-pressed", "false");
+});
+
+test("rotation inputs apply rotation and update dimensions", async ({ page }) => {
+  await page.setInputFiles("#fileInput", {
+    name: "tiny.stl",
+    mimeType: "model/stl",
+    buffer: Buffer.from(tinyStl)
+  });
+  await expect(page.locator("#fileName")).toHaveText("tiny.stl", { timeout: 10000 });
+
+  const dimZBefore = await page.locator("#dimZ").inputValue();
+
+  // Open rotation row
+  await page.locator("#rotateToggleBtn").click();
+  await expect(page.locator("#rotationRow")).toBeVisible();
+
+  // Type 90° on X and apply
+  await page.locator("#rotX").fill("90");
+  await page.locator("#applyRotationBtn").click();
+
+  await expect(page.locator("#statusMessage")).toContainText("Rotated");
+
+  // After 90° X rotation, dimensions should change
+  const dimZAfter = await page.locator("#dimZ").inputValue();
+  expect(dimZAfter).not.toBe(dimZBefore);
+
+  // Inputs should reset to 0 after apply
+  await expect(page.locator("#rotX")).toHaveValue("0");
+  await expect(page.locator("#rotY")).toHaveValue("0");
+  await expect(page.locator("#rotZ")).toHaveValue("0");
+});
+
+test("rotation via Enter key applies rotation", async ({ page }) => {
+  await page.setInputFiles("#fileInput", {
+    name: "tiny.stl",
+    mimeType: "model/stl",
+    buffer: Buffer.from(tinyStl)
+  });
+  await expect(page.locator("#fileName")).toHaveText("tiny.stl", { timeout: 10000 });
+
+  await page.locator("#rotateToggleBtn").click();
+  await page.locator("#rotY").fill("45");
+  await page.locator("#rotY").press("Enter");
+
+  await expect(page.locator("#statusMessage")).toContainText("Rotated");
+  await expect(page.locator("#rotY")).toHaveValue("0");
+});
+
+test("reset rotation button clears inputs", async ({ page }) => {
+  await page.setInputFiles("#fileInput", {
+    name: "tiny.stl",
+    mimeType: "model/stl",
+    buffer: Buffer.from(tinyStl)
+  });
+  await expect(page.locator("#fileName")).toHaveText("tiny.stl", { timeout: 10000 });
+
+  await page.locator("#rotateToggleBtn").click();
+  await page.locator("#rotX").fill("30");
+  await page.locator("#rotY").fill("60");
+  await page.locator("#rotZ").fill("90");
+
+  await page.locator("#resetRotationBtn").click();
+
+  await expect(page.locator("#rotX")).toHaveValue("0");
+  await expect(page.locator("#rotY")).toHaveValue("0");
+  await expect(page.locator("#rotZ")).toHaveValue("0");
+});
+
+test("rotation row hides when a new file is loaded", async ({ page }) => {
+  await page.setInputFiles("#fileInput", {
+    name: "tiny.stl",
+    mimeType: "model/stl",
+    buffer: Buffer.from(tinyStl)
+  });
+  await expect(page.locator("#fileName")).toHaveText("tiny.stl", { timeout: 10000 });
+
+  // Open rotation row
+  await page.locator("#rotateToggleBtn").click();
+  await expect(page.locator("#rotationRow")).toBeVisible();
+
+  // Load a new file
+  await page.setInputFiles("#fileInput", {
+    name: "tiny2.stl",
+    mimeType: "model/stl",
+    buffer: Buffer.from(tinyStl)
+  });
+  await expect(page.locator("#fileName")).toHaveText("tiny2.stl", { timeout: 10000 });
+
+  // Rotation row should be hidden and toggle reset
+  await expect(page.locator("#rotationRow")).not.toBeVisible();
+  await expect(page.locator("#rotateToggleBtn")).toHaveAttribute("aria-pressed", "false");
+});

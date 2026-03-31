@@ -145,7 +145,15 @@
         </button>
       </div>
       <div class="canvas-overlay-group canvas-overlay-group--bottom">
-        <button id="minimizeFootprintBtn" class="canvas-overlay-btn" title="Orient to minimize XZ footprint" type="button" disabled>
+        <button id="rotateToggleBtn" class="canvas-overlay-btn" title="Toggle rotation controls" type="button" disabled aria-pressed="false">
+          <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" width="22" height="22" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M4 12a8 8 0 0 1 14.5-4.5"/>
+            <polyline points="19 3 19 8 14 8"/>
+            <path d="M20 12a8 8 0 0 1-14.5 4.5"/>
+            <polyline points="5 21 5 16 10 16"/>
+          </svg>
+        </button>
+        <button id="minimizeFootprintBtn" class="canvas-overlay-btn" title="Orient to maximize XZ footprint (best print orientation)" type="button" disabled>
           <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" width="22" height="22" aria-hidden="true" stroke-linecap="round" stroke-linejoin="round">
             <rect x="7" y="7" width="10" height="10" stroke="currentColor" stroke-width="1.5" fill="none" rx="1"/>
             <line x1="3" y1="3" x2="7" y2="7" stroke="currentColor" stroke-width="1.5"/>
@@ -180,6 +188,20 @@
           <span>Uniform</span>
         </label>
       </div>
+    </div>
+
+    <div class="viewer-transform-row viewer-rotation-row" id="rotationRow" style="display:none;">
+      <div class="viewer-dim-group">
+        <span class="dim-axis">X</span>
+        <input class="dim-input rot-input" id="rotX" type="number" step="15" value="0" placeholder="0">
+        <span class="dim-axis">Y</span>
+        <input class="dim-input rot-input" id="rotY" type="number" step="15" value="0" placeholder="0">
+        <span class="dim-axis">Z</span>
+        <input class="dim-input rot-input" id="rotZ" type="number" step="15" value="0" placeholder="0">
+        <span class="dim-unit">°</span>
+      </div>
+      <button class="model-tool-btn" id="applyRotationBtn" type="button" title="Apply rotation to geometry">Apply</button>
+      <button class="model-tool-btn" id="resetRotationBtn" type="button" title="Reset rotation to 0°">Reset</button>
     </div>
 
     <section class="refinement-panel" aria-label="Triangle refinement control">

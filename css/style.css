@@ -473,6 +473,17 @@ body {
   cursor: pointer;
 }
 
+.viewer-rotation-row .rot-input {
+  width: 3.2rem;
+  -moz-appearance: auto;
+}
+
+.viewer-rotation-row .rot-input::-webkit-outer-spin-button,
+.viewer-rotation-row .rot-input::-webkit-inner-spin-button {
+  -webkit-appearance: auto;
+  opacity: 1;
+}
+
 #viewerCanvas {
   width: 100%;
   height: 460px;

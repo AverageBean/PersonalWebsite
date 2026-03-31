@@ -38,6 +38,13 @@ document.addEventListener("DOMContentLoaded", () => {
   const scaleDisplay = document.getElementById("scaleDisplay");
   const minimizeFootprintBtn = document.getElementById("minimizeFootprintBtn");
   const uniformScaleCheckbox = document.getElementById("uniformScaleCheckbox");
+  const rotateToggleBtn = document.getElementById("rotateToggleBtn");
+  const rotationRow = document.getElementById("rotationRow");
+  const rotX = document.getElementById("rotX");
+  const rotY = document.getElementById("rotY");
+  const rotZ = document.getElementById("rotZ");
+  const applyRotationBtn = document.getElementById("applyRotationBtn");
+  const resetRotationBtn = document.getElementById("resetRotationBtn");
 
   // ── Tab switching ──────────────────────────────────────────────────────
   const tabBtns = document.querySelectorAll('.tab-btn');
@@ -433,6 +440,7 @@ document.addEventListener("DOMContentLoaded", () => {
     if (scaleHalfBtn) scaleHalfBtn.disabled = !hasModel;
     if (scaleDoubleBtn) scaleDoubleBtn.disabled = !hasModel;
     if (minimizeFootprintBtn) minimizeFootprintBtn.disabled = !hasModel;
+    if (rotateToggleBtn) rotateToggleBtn.disabled = !hasModel;
     if (uniformScaleCheckbox) uniformScaleCheckbox.disabled = !hasModel;
     if (dimXInput) dimXInput.disabled = !hasModel;
     if (dimYInput) dimYInput.disabled = !hasModel;
@@ -442,6 +450,12 @@ document.addEventListener("DOMContentLoaded", () => {
       if (dimYInput) dimYInput.value = "";
       if (dimZInput) dimZInput.value = "";
       if (scaleDisplay) scaleDisplay.textContent = "1.00×";
+      if (rotationRow) rotationRow.style.display = "none";
+      if (rotateToggleBtn) {
+        rotateToggleBtn.setAttribute("aria-pressed", "false");
+        rotateToggleBtn.classList.remove("is-active");
+      }
+      resetRotationInputs();
     }
     updateBboxPreview();
   }
@@ -593,7 +607,8 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   // Tests all 6 axis-aligned face-down orientations, picks the one with the
-  // smallest XZ bounding-box footprint, bakes it into baseGeometry, and rebuilds.
+  // largest XZ bounding-box footprint (best 3D-print orientation), bakes it
+  // into baseGeometry, and rebuilds.
   function minimizeFootprint() {
     if (!baseGeometry) {
       return;
@@ -609,7 +624,7 @@ document.addEventListener("DOMContentLoaded", () => {
       new THREE.Euler( Math.PI / 2,  0, 0,            "XYZ")   // -Z up
     ];
 
-    let bestArea = Infinity;
+    let bestArea = -Infinity;
     let bestMatrix = null;
 
     const rotMatrix = new THREE.Matrix4();
@@ -629,7 +644,7 @@ document.addEventListener("DOMContentLoaded", () => {
       const size = probeGeom.boundingBox.getSize(new THREE.Vector3());
       const area = size.x * size.z;
 
-      if (area < bestArea) {
+      if (area > bestArea) {
         bestArea = area;
         bestMatrix = rotMatrix.clone();
       }
@@ -650,7 +665,42 @@ document.addEventListener("DOMContentLoaded", () => {
     // the original dimensions. Reset to 1× so the display is not misleading.
     scaleX = scaleY = scaleZ = 1.0;
     rebuildModelFromSettings();
-    setStatus("Model reoriented to minimize XZ footprint.");
+    setStatus("Model reoriented to maximize XZ footprint.");
+  }
+
+  // ── Rotation controls ────────────────────────────────────────────────────
+
+  function resetRotationInputs() {
+    if (rotX) rotX.value = "0";
+    if (rotY) rotY.value = "0";
+    if (rotZ) rotZ.value = "0";
+  }
+
+  function applyRotation() {
+    if (!baseGeometry) return;
+
+    const rx = parseFloat(rotX.value) || 0;
+    const ry = parseFloat(rotY.value) || 0;
+    const rz = parseFloat(rotZ.value) || 0;
+
+    if (rx === 0 && ry === 0 && rz === 0) return;
+
+    const euler = new THREE.Euler(
+      rx * Math.PI / 180,
+      ry * Math.PI / 180,
+      rz * Math.PI / 180,
+      "XYZ"
+    );
+    const rotMatrix = new THREE.Matrix4().makeRotationFromEuler(euler);
+
+    baseGeometry.applyMatrix4(rotMatrix);
+    centerGeometryAtOrigin(baseGeometry);
+    baseGeometry.computeBoundingBox();
+
+    scaleX = scaleY = scaleZ = 1.0;
+    rebuildModelFromSettings();
+    resetRotationInputs();
+    setStatus(`Rotated ${rx}° X, ${ry}° Y, ${rz}° Z.`);
   }
 
   // Crease angle for smooth-shading: faces whose dihedral exceeds this will
@@ -1572,6 +1622,35 @@ document.addEventListener("DOMContentLoaded", () => {
       minimizeFootprint();
     });
   }
+
+  if (rotateToggleBtn && rotationRow) {
+    rotateToggleBtn.addEventListener("click", () => {
+      const show = rotationRow.style.display === "none";
+      rotationRow.style.display = show ? "" : "none";
+      rotateToggleBtn.setAttribute("aria-pressed", String(show));
+      rotateToggleBtn.classList.toggle("is-active", show);
+    });
+  }
+
+  if (applyRotationBtn) {
+    applyRotationBtn.addEventListener("click", applyRotation);
+  }
+
+  if (resetRotationBtn) {
+    resetRotationBtn.addEventListener("click", () => {
+      resetRotationInputs();
+    });
+  }
+
+  [rotX, rotY, rotZ].forEach(input => {
+    if (!input) return;
+    input.addEventListener("keydown", e => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        applyRotation();
+      }
+    });
+  });
 
   if (uniformScaleCheckbox) {
     uniformScaleCheckbox.addEventListener("change", () => {

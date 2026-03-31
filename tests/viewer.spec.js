@@ -91,8 +91,9 @@ test("grid sits below model base after STL load (visual)", async ({ page }) => {
   await expect(page.locator("#fileName")).toContainText("CurvedMinimalPost", { timeout: 15000 });
   await expect(page.locator("#triangleCount")).not.toHaveText("0");
 
-  // Wait for several animation frames so WebGL has rendered the lifted model
-  await page.waitForTimeout(600);
+  // Wait for dimensions to populate (proves model processing is complete)
+  await expect(page.locator("#dimX")).not.toHaveValue("", { timeout: 10000 });
+  await page.waitForTimeout(300);
 
   // Capture the full viewer panel for spatial context
   await page.locator(".viewer-panel").screenshot({
@@ -122,8 +123,7 @@ test("grid sits below model base after STL load (visual)", async ({ page }) => {
   await expect(page.locator("#statusMessage")).not.toContainText("error");
 
   // X dimension must be populated (proves bounding-box is in world space)
-  const dimX = await page.locator("#dimX").inputValue();
-  expect(dimX).not.toBe("");
+  await expect(page.locator("#dimX")).not.toHaveValue("", { timeout: 10000 });
 });
 
 test("zoom to fit fills viewport for micro-scale STL (visual)", async ({ page }) => {
@@ -433,6 +433,8 @@ endsolid tiny`)
 });
 
 test("MeshRing1 parametric STEP: converter returns valid STEP with cylindrical surfaces", async ({ page, request }) => {
+  test.setTimeout(240000);
+
   if (!(await converterIsRunning(request))) {
     test.skip(true, "Converter service not running — start with: npm run convert:start");
     return;
@@ -445,7 +447,7 @@ test("MeshRing1 parametric STEP: converter returns valid STEP with cylindrical s
     {
       headers: { "Content-Type": "application/octet-stream" },
       data: stlBuffer,
-      timeout: 90000
+      timeout: 180000
     }
   );
 

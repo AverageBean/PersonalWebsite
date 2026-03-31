@@ -33,7 +33,10 @@
       "Bash(\"C:/Program Files/FreeCAD 1.0/bin/python.exe\" tools/convert-stl-to-step-parametric-with-freecad.py \"TestDocs/Station_3_Baseplate - Part 1.stl\" \"Testoutput/2026-03-23_baseplate_segmented.step\")",
       "Bash(\"C:/Program Files/FreeCAD 1.0/bin/python.exe\" tools/compare-step-to-stl.py \"TestDocs/Station_3_Baseplate - Part 1.stl\" \"Testoutput/2026-03-23_baseplate_segmented.step\")",
       "Bash(cd:*)",
-      "Bash(git:*)"
+      "Bash(git:*)",
+      "Bash(node:*)",
+      "Bash(CI=true npx playwright test --reporter=line 2>&1)",
+      "Bash(taskkill:*)"
     ]
   }
 }

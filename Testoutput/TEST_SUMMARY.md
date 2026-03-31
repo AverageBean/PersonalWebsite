@@ -22,6 +22,37 @@ The right panel (viewer-panel) had no tab navigation. Adding tabs required verif
 
 ---
 
+## Viewer Controls and Export Coverage Gaps
+**Date:** 2026-03-31
+**Status:** Resolved
+**Active:** none (no visual artifacts)
+
+### Problem
+Multiple viewer features lacked Playwright coverage: camera reset button, grid/bbox toggle click behavior, camera presets, all view styles, all background styles, drag-and-drop file loading, and export downloads (STL/OBJ/GLB). These gaps meant regressions in primary user interactions would go undetected.
+
+### Tests Used
+`tests/viewer-controls.spec.js` — 15 tests, Chromium:
+- Camera reset with no model shows default-view status
+- Camera reset with model loaded shows frame-model status
+- Grid toggle button flips aria-pressed and status message (on→off→on)
+- Bbox toggle activates after model load and toggles aria-pressed (off→on→off)
+- Camera preset selection updates usage tip and status (all 3 presets)
+- All view styles apply without error (solid, overlay, wireframe, flat)
+- All background styles apply without error (neutral, dark, warm, lab)
+- Drop zone activates on dragenter and deactivates on dragleave
+- Drop zone click triggers file input
+- Dropping an STL file loads the model
+- STL export produces a non-empty download
+- OBJ export produces a non-empty download
+- GLB export produces a non-empty download
+- Export button is disabled when no model is loaded
+- Export hint updates when format is changed
+
+### Interpretation
+15/15 passed. Full suite (42 tests across 4 spec files) runs with 41 passed, 1 skipped (converter-dependent parametric STEP test). No regressions. Coverage now includes all viewer control interactions, all export formats (client-side), and the drag-and-drop flow.
+
+---
+
 Documents each resolved or ongoing issue: the problem, tests used, and interpretation of outcomes.
 Archived artifacts are in `Testoutput/archive/`.
 

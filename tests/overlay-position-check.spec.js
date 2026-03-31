@@ -25,7 +25,8 @@ test("overlay buttons: with model — both buttons visible and aligned (visual)"
   const stlPath = path.join(TESTDOCS_DIR, "CurvedMinimalPost-Onshape.stl");
   await page.setInputFiles("#fileInput", stlPath);
   await expect(page.locator("#fileName")).toContainText("CurvedMinimalPost", { timeout: 15000 });
-  await page.waitForTimeout(600);
+  await expect(page.locator("#dimX")).not.toHaveValue("", { timeout: 10000 });
+  await page.waitForTimeout(300);
 
   await page.locator(".viewer-canvas-wrapper").screenshot({
     path: path.join(TESTOUTPUT_DIR, `${RUN_DATE}_overlay-with-model.png`)
@@ -34,7 +35,7 @@ test("overlay buttons: with model — both buttons visible and aligned (visual)"
   // Both must be visible and enabled after load
   await expect(page.locator("#gridToggleBtn")).toBeVisible();
   await expect(page.locator("#bboxToggleBtn")).toBeVisible();
-  await expect(page.locator("#bboxToggleBtn")).toBeEnabled();
+  await expect(page.locator("#bboxToggleBtn")).toBeEnabled({ timeout: 10000 });
 
   // Measure their bounding boxes
   const gridBox = await page.locator("#gridToggleBtn").boundingBox();

@@ -36,7 +36,22 @@
       "Bash(git:*)",
       "Bash(node:*)",
       "Bash(CI=true npx playwright test --reporter=line 2>&1)",
-      "Bash(taskkill:*)"
+      "Bash(taskkill:*)",
+      "Bash(mkdir -p /tmp/mold_test)",
+      "Read(//tmp/**)",
+      "Bash(\"C:/Program Files/FreeCAD 1.0/bin/FreeCADCmd.exe\" \"C:/Users/berry/WebstormProjects/PersonalWebsite/tools/generate-mold-with-freecad.py\" \"C:/Users/berry/WebstormProjects/PersonalWebsite/TestDocs/MeshRing1.stl\" \"/tmp/mold_test\" \"/tmp/mold_test/params.json\" 2>&1)",
+      "Bash(\"C:/Program Files/FreeCAD 1.0/bin/FreeCADCmd.exe\" -c \"import sys; print\\('argv:', sys.argv\\)\" 2>&1)",
+      "Bash(\"C:/Program Files/FreeCAD 1.0/bin/FreeCADCmd.exe\" \"C:/Users/berry/WebstormProjects/PersonalWebsite/tools/convert-stl-to-step-with-freecad.py\" arg1 arg2)",
+      "Bash(\"C:/Program Files/FreeCAD 1.0/bin/python.exe\" \"C:/Users/berry/WebstormProjects/PersonalWebsite/tools/generate-mold-with-freecad.py\" \"C:/Users/berry/WebstormProjects/PersonalWebsite/TestDocs/MeshRing1.stl\" \"/tmp/mold_test\" \"/tmp/mold_test/params.json\" 2>&1)",
+      "Bash(mkdir -p /tmp/mold_test2)",
+      "Bash(\"C:/Program Files/FreeCAD 1.0/bin/python.exe\" \"C:/Users/berry/WebstormProjects/PersonalWebsite/tools/generate-mold-with-freecad.py\" \"C:/Users/berry/WebstormProjects/PersonalWebsite/TestDocs/Station_3_Baseplate - Part 1.stl\" \"/tmp/mold_test2\" \"/tmp/mold_test2/params.json\")",
+      "Bash(curl:*)",
+      "Bash(netstat -aon)",
+      "Bash(unzip:*)",
+      "Bash(mkdir -p /tmp/mold_sprue_test)",
+      "Bash(\"C:/Program Files/FreeCAD 1.0/bin/python.exe\" \"C:/Users/berry/WebstormProjects/PersonalWebsite/tools/generate-mold-with-freecad.py\" \"C:/Users/berry/WebstormProjects/PersonalWebsite/TestDocs/MeshRing1.stl\" \"/tmp/mold_sprue_test\" \"/tmp/mold_sprue_test/params.json\")",
+      "Bash(mkdir -p /tmp/mold_nosprue)",
+      "Bash(\"C:/Program Files/FreeCAD 1.0/bin/python.exe\" \"C:/Users/berry/WebstormProjects/PersonalWebsite/tools/generate-mold-with-freecad.py\" \"C:/Users/berry/WebstormProjects/PersonalWebsite/TestDocs/MeshRing1.stl\" \"/tmp/mold_nosprue\" \"/tmp/mold_nosprue/params.json\")"
     ]
   }
 }

@@ -3,6 +3,7 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const { spawn, spawnSync } = require("child_process");
+const zlib = require("zlib");
 
 function loadDotEnvIfPresent() {
   const dotenvPath = path.join(process.cwd(), ".env");
@@ -47,6 +48,7 @@ const MAX_UPLOAD_BYTES = Number(process.env.CAD_CONVERTER_MAX_UPLOAD || 120 * 10
 const converterScript = path.join(__dirname, "convert-sldprt-with-freecad.py");
 const stepConverterScript = path.join(__dirname, "convert-stl-to-step-with-freecad.py");
 const parametricConverterScript = path.join(__dirname, "convert-stl-to-step-parametric-with-freecad.py");
+const moldGeneratorScript = path.join(__dirname, "generate-mold-with-freecad.py");
 const CLOUDCONVERT_API_KEY = process.env.CLOUDCONVERT_API_KEY || "";
 const CLOUDCONVERT_API_BASE = process.env.CLOUDCONVERT_API_BASE || "https://api.cloudconvert.com/v2";
 const ONSHAPE_ACCESS_KEY = process.env.ONSHAPE_ACCESS_KEY || "";
@@ -705,6 +707,220 @@ async function handleStlToStepParametricConversion(req, res) {
   }
 }
 
+// ── Minimal PKZip builder (no npm dependency) ──────────────────────────────
+
+function buildMinimalZip(entries) {
+  // entries: Array<{ name: string, data: Buffer }>
+  const localHeaders = [];
+  const centralHeaders = [];
+  let offset = 0;
+
+  for (const entry of entries) {
+    const nameBytes = Buffer.from(entry.name, "utf8");
+    const compressed = zlib.deflateRawSync(entry.data, { level: 6 });
+    const crc = crc32(entry.data);
+
+    // Local file header (30 + name + compressed data)
+    const local = Buffer.alloc(30 + nameBytes.length);
+    local.writeUInt32LE(0x04034b50, 0);   // signature
+    local.writeUInt16LE(20, 4);           // version needed
+    local.writeUInt16LE(0, 6);            // flags
+    local.writeUInt16LE(8, 8);            // compression: deflate
+    local.writeUInt16LE(0, 10);           // mod time
+    local.writeUInt16LE(0, 12);           // mod date
+    local.writeUInt32LE(crc, 14);         // crc-32
+    local.writeUInt32LE(compressed.length, 18);  // compressed size
+    local.writeUInt32LE(entry.data.length, 22);  // uncompressed size
+    local.writeUInt16LE(nameBytes.length, 26);   // filename length
+    local.writeUInt16LE(0, 28);           // extra field length
+    nameBytes.copy(local, 30);
+    localHeaders.push(Buffer.concat([local, compressed]));
+
+    // Central directory header
+    const central = Buffer.alloc(46 + nameBytes.length);
+    central.writeUInt32LE(0x02014b50, 0); // signature
+    central.writeUInt16LE(20, 4);         // version made by
+    central.writeUInt16LE(20, 6);         // version needed
+    central.writeUInt16LE(0, 8);          // flags
+    central.writeUInt16LE(8, 10);         // compression: deflate
+    central.writeUInt16LE(0, 12);         // mod time
+    central.writeUInt16LE(0, 14);         // mod date
+    central.writeUInt32LE(crc, 16);       // crc-32
+    central.writeUInt32LE(compressed.length, 20);  // compressed size
+    central.writeUInt32LE(entry.data.length, 24);  // uncompressed size
+    central.writeUInt16LE(nameBytes.length, 28);   // filename length
+    central.writeUInt16LE(0, 30);         // extra field length
+    central.writeUInt16LE(0, 32);         // file comment length
+    central.writeUInt16LE(0, 34);         // disk number
+    central.writeUInt16LE(0, 36);         // internal attrs
+    central.writeUInt32LE(0, 38);         // external attrs
+    central.writeUInt32LE(offset, 42);    // local header offset
+    nameBytes.copy(central, 46);
+    centralHeaders.push(central);
+
+    offset += 30 + nameBytes.length + compressed.length;
+  }
+
+  const centralDirBuf = Buffer.concat(centralHeaders);
+  const centralDirOffset = offset;
+
+  // End of central directory (22 bytes)
+  const eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(0x06054b50, 0);              // signature
+  eocd.writeUInt16LE(0, 4);                       // disk number
+  eocd.writeUInt16LE(0, 6);                       // disk with central dir
+  eocd.writeUInt16LE(entries.length, 8);           // entries on this disk
+  eocd.writeUInt16LE(entries.length, 10);           // total entries
+  eocd.writeUInt32LE(centralDirBuf.length, 12);    // central dir size
+  eocd.writeUInt32LE(centralDirOffset, 16);        // central dir offset
+  eocd.writeUInt16LE(0, 20);                       // comment length
+
+  return Buffer.concat([...localHeaders, centralDirBuf, eocd]);
+}
+
+function crc32(buf) {
+  // Standard CRC-32 (ISO 3309)
+  let crc = 0xFFFFFFFF;
+  for (let i = 0; i < buf.length; i++) {
+    crc ^= buf[i];
+    for (let j = 0; j < 8; j++) {
+      crc = (crc >>> 1) ^ (crc & 1 ? 0xEDB88320 : 0);
+    }
+  }
+  return (crc ^ 0xFFFFFFFF) >>> 0;
+}
+
+// ── Mold generation ─────────────────────────────────────────────────────────
+
+function runFreeCadMoldGeneration(freeCadRuntime, inputPath, outputDir, paramsPath) {
+  return new Promise((resolve, reject) => {
+    const commandArgs = [...(freeCadRuntime.args || []), moldGeneratorScript, inputPath, outputDir, paramsPath];
+    const processHandle = spawn(freeCadRuntime.executable, commandArgs, {
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+
+    const stdoutChunks = [];
+    const stderrChunks = [];
+
+    processHandle.stdout.on("data", chunk => stdoutChunks.push(chunk));
+    processHandle.stderr.on("data", chunk => stderrChunks.push(chunk));
+
+    processHandle.on("error", error => reject(error));
+
+    processHandle.on("close", code => {
+      const stdout = Buffer.concat(stdoutChunks).toString("utf8").trim();
+      const stderr = Buffer.concat(stderrChunks).toString("utf8").trim();
+
+      if (code === 0) {
+        resolve({ stdout, stderr });
+        return;
+      }
+
+      const message = stderr || stdout || `FreeCAD exited with code ${code}.`;
+      reject(new Error(message));
+    });
+  });
+}
+
+async function handleStlToMoldGeneration(req, res) {
+  const incomingName = parseIncomingFilename(req.url);
+  if (!incomingName.toLowerCase().endsWith(".stl")) {
+    sendJson(res, 400, { error: "Only .stl uploads are accepted by this endpoint." });
+    return;
+  }
+
+  const freeCadRuntime = detectFreeCadExecutable();
+  if (!freeCadRuntime.executable) {
+    sendJson(res, 503, {
+      error: "FreeCAD is not available on this server. Install FreeCAD to enable mold generation."
+    });
+    return;
+  }
+
+  // Parse mold parameters from query string
+  const urlObj = new URL(req.url, `http://${req.headers.host || "localhost"}`);
+  const wallThickness = Number(urlObj.searchParams.get("wallThickness") || 10);
+  const clearance = Number(urlObj.searchParams.get("clearance") || 0);
+  const splitHeight = Number(urlObj.searchParams.get("splitHeight"));
+  const pinDiameter = Number(urlObj.searchParams.get("pinDiameter") || 5);
+  const pinInset = Number(urlObj.searchParams.get("pinInset") || 8);
+  const pinTolerance = Number(urlObj.searchParams.get("pinTolerance") || 0.4);
+  const sprueDiameter = Number(urlObj.searchParams.get("sprueDiameter") || 6);
+  const sprueEnabled = urlObj.searchParams.get("sprueEnabled") !== "false";
+
+  if (isNaN(splitHeight)) {
+    sendJson(res, 400, { error: "splitHeight query parameter is required." });
+    return;
+  }
+  if (wallThickness <= 0 || pinDiameter <= 0 || sprueDiameter <= 0) {
+    sendJson(res, 400, { error: "wallThickness, pinDiameter, and sprueDiameter must be positive." });
+    return;
+  }
+
+  let tempDir = "";
+  try {
+    const body = await readRequestBody(req);
+    if (!body.length) {
+      sendJson(res, 400, { error: "Upload body is empty." });
+      return;
+    }
+
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "stl-mold-"));
+    const inputPath = path.join(tempDir, incomingName);
+    fs.writeFileSync(inputPath, body);
+
+    // Write params JSON
+    const paramsObj = { wallThickness, clearance, splitHeight, pinDiameter, pinInset, pinTolerance, sprueDiameter, sprueEnabled };
+    const paramsPath = path.join(tempDir, "params.json");
+    fs.writeFileSync(paramsPath, JSON.stringify(paramsObj));
+
+    console.log(`[mold] starting generation: ${incomingName} (wall=${wallThickness}, split=${splitHeight})`);
+    let result;
+    try {
+      result = await runFreeCadMoldGeneration(freeCadRuntime, inputPath, tempDir, paramsPath);
+    } catch (convErr) {
+      console.error("[mold] FreeCAD process failed:\n" + convErr.message);
+      throw convErr;
+    }
+
+    console.log("[mold stdout]\n" + result.stdout);
+    if (result.stderr) console.error("[mold stderr]\n" + result.stderr);
+
+    // Parse output JSON from stdout: {"top": "path", "bottom": "path"}
+    let outputPaths;
+    try {
+      outputPaths = JSON.parse(result.stdout);
+    } catch (e) {
+      throw new Error("Could not parse output paths from FreeCAD script.");
+    }
+
+    if (!exists(outputPaths.top) || !exists(outputPaths.bottom)) {
+      throw new Error("FreeCAD did not produce both mold STL files.");
+    }
+
+    const topBuf = fs.readFileSync(outputPaths.top);
+    const bottomBuf = fs.readFileSync(outputPaths.bottom);
+    const stem = path.basename(incomingName, path.extname(incomingName));
+
+    const zipBuffer = buildMinimalZip([
+      { name: `${stem}-mold-top.stl`, data: topBuf },
+      { name: `${stem}-mold-bottom.stl`, data: bottomBuf }
+    ]);
+
+    sendBinary(res, 200, "application/zip", zipBuffer, `${stem}-mold.zip`, {
+      "X-Converter-Method": "freecad-mold"
+    });
+  } catch (error) {
+    sendJson(res, 500, {
+      error: `Mold generation failed: ${error.message}`
+    });
+  } finally {
+    if (tempDir && exists(tempDir)) {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  }
+}
+
 async function handleStlToStepConversion(req, res) {
   const incomingName = parseIncomingFilename(req.url);
   if (!incomingName.toLowerCase().endsWith(".stl")) {
@@ -844,6 +1060,11 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (req.method === "POST" && req.url.startsWith("/api/convert/stl-to-mold")) {
+    await handleStlToMoldGeneration(req, res);
+    return;
+  }
+
   if (req.method === "POST" && req.url === "/api/convert/onshape/partstudio-to-stl") {
     await handleOnshapePartStudioExport(req, res);
     return;
@@ -857,6 +1078,7 @@ server.listen(PORT, HOST, () => {
   console.log("[converter] endpoint: POST /api/convert/sldprt-to-stl?filename=<name>.sldprt");
   console.log("[converter] endpoint: POST /api/convert/stl-to-step?filename=<name>.stl");
   console.log("[converter] endpoint: POST /api/convert/stl-to-step-parametric?filename=<name>.stl");
+  console.log("[converter] endpoint: POST /api/convert/stl-to-mold?filename=<name>.stl&wallThickness=10&splitHeight=25&...");
   console.log("[converter] endpoint: POST /api/convert/onshape/partstudio-to-stl");
   console.log("[converter] health: GET /api/health");
   console.log(`[converter] cloudconvert fallback: ${CLOUDCONVERT_API_KEY ? "enabled" : "disabled"}`);

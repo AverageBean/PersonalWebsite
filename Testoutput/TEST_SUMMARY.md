@@ -1,5 +1,52 @@
 # Test Output Summary
 
+## Slice / Cross-Section View
+**Date:** 2026-04-02
+**Status:** Resolved
+**Active:** `2026-04-02_slice-helical-y-mid.png`
+
+### Problem
+No way to visualize internal geometry of STL models. Users with hollow or internally-featured parts (e.g., helical tubes with internal spirals) had no means of inspecting interior structures without modifying the mesh.
+
+### Tests Used
+`tests/slice-view.spec.js` — 9 tests, Chromium:
+- Slice toggle disabled before model load, enabled after
+- Slice toggle shows/hides panel with correct aria-pressed state
+- Panel defaults: Y axis checked, flip unchecked, cap checked, readout shows mm
+- Slider range matches model bounding box on Y axis
+- Changing axis radio updates slider range
+- Panel hides and toggle resets when a new file is loaded
+- GPU clipping validation: canvas pixels differ before/after slice at extreme position
+- Slice and mold panels can both be open simultaneously
+- HelicalTube1 Y midpoint screenshot — visual regression baseline
+
+### Interpretation
+9/9 passed. Full suite (63 tests across 6 spec files) all pass. GPU clipping validated via pixel-level comparison. Stencil-buffer cross-section cap fills cut face with solid color. Interactive drag, axis switching (X/Y/Z), flip, and cap toggle all functional. No performance issues with 11MB HelicalTube1.stl.
+
+---
+
+## Mold Generator
+**Date:** 2026-04-01
+**Status:** Resolved
+**Active:** `2026-04-01_mold-generation.zip`
+
+### Problem
+No mold generation capability existed. Users needed to create two-part molds from loaded STL models — a rectangular block with the model subtracted, bisected into printable halves with registration pins/holes and a sprue channel.
+
+### Tests Used
+`tests/mold-generator.spec.js` — 6 tests, Chromium:
+- Mold toggle button disabled when no model loaded, enabled after
+- Mold toggle shows/hides mold panel with correct aria-pressed state
+- Mold panel has correct default parameter values (wall=10, clearance=0, pin=5, inset=8, sprue=6)
+- Split slider range matches model bounding box, readout shows mm
+- Mold panel hides and toggle resets when a new file is loaded
+- Generate mold produces a non-empty zip download (requires converter service; wall=10mm, split at midpoint)
+
+### Interpretation
+6/6 passed. Full suite (54 tests across 5 spec files) all pass including the previously-skipped parametric STEP test (converter running). Mold zip verified: contains top and bottom STL halves, 448KB total for MeshRing1.
+
+---
+
 ## Panel Tab Navigation
 **Date:** 2026-03-25
 **Status:** Resolved

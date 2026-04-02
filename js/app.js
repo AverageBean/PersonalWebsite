@@ -45,6 +45,27 @@ document.addEventListener("DOMContentLoaded", () => {
   const rotZ = document.getElementById("rotZ");
   const applyRotationBtn = document.getElementById("applyRotationBtn");
   const resetRotationBtn = document.getElementById("resetRotationBtn");
+  const moldToggleBtn = document.getElementById("moldToggleBtn");
+  const moldPanel = document.getElementById("moldPanel");
+  const moldWallInput = document.getElementById("moldWall");
+  const moldClearanceInput = document.getElementById("moldClearance");
+  const moldSplitSlider = document.getElementById("moldSplitSlider");
+  const moldSplitValue = document.getElementById("moldSplitValue");
+  const moldPinDiameterInput = document.getElementById("moldPinDiameter");
+  const moldPinInsetInput = document.getElementById("moldPinInset");
+  const moldPinToleranceInput = document.getElementById("moldPinTolerance");
+  const moldSprueDiameterInput = document.getElementById("moldSprueDiameter");
+  const moldSprueEnabledCheckbox = document.getElementById("moldSprueEnabled");
+  const generateMoldBtn = document.getElementById("generateMoldBtn");
+  const sliceToggleBtn = document.getElementById("sliceToggleBtn");
+  const slicePanel = document.getElementById("slicePanel");
+  const slicePositionSlider = document.getElementById("slicePositionSlider");
+  const slicePositionValue = document.getElementById("slicePositionValue");
+  const sliceAxisXRadio = document.getElementById("sliceAxisX");
+  const sliceAxisYRadio = document.getElementById("sliceAxisY");
+  const sliceAxisZRadio = document.getElementById("sliceAxisZ");
+  const sliceFlipCheckbox = document.getElementById("sliceFlipCheckbox");
+  const sliceCapCheckbox = document.getElementById("sliceCapCheckbox");
 
   // ── Tab switching ──────────────────────────────────────────────────────
   const tabBtns = document.querySelectorAll('.tab-btn');
@@ -142,7 +163,7 @@ document.addEventListener("DOMContentLoaded", () => {
   // preserveDrawingBuffer keeps the framebuffer alive after composition so that
   // gl.readPixels works for pixel-level tests and potential future canvas exports.
   // The swap-chain optimisation it trades away is not meaningful for a single-mesh viewer.
-  const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+  const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true, stencil: true });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
   viewerCanvas.appendChild(renderer.domElement);
 
@@ -183,6 +204,19 @@ document.addEventListener("DOMContentLoaded", () => {
   let bboxOverlayActive = false;
   let gridVisible = true;
   let currentPartColor = 0x4c86a8;
+  let moldSplitPlane = null;
+  let moldPanelVisible = false;
+  let moldSplitY = 0;
+  let isDraggingSplitPlane = false;
+  let slicePanelVisible = false;
+  let sliceActive = false;
+  let sliceAxis = "y";
+  let slicePosition = 0;
+  let sliceFlipped = false;
+  let isDraggingSlicePlane = false;
+  let sliceClipPlane = null;
+  let slicePreviewPlane = null;
+  let sliceStencilBackMesh = null;
 
   function resizeRenderer() {
     const width = viewerCanvas.clientWidth;
@@ -398,6 +432,15 @@ document.addEventListener("DOMContentLoaded", () => {
       return;
     }
 
+    // Clean up slice clipping before tearing down model (stencil meshes are children of currentModelRoot)
+    removeSliceClipping();
+    slicePanelVisible = false;
+    if (slicePanel) slicePanel.style.display = "none";
+    if (sliceToggleBtn) {
+      sliceToggleBtn.classList.remove("is-active");
+      sliceToggleBtn.setAttribute("aria-pressed", "false");
+    }
+
     scene.remove(currentModelRoot);
 
     if (currentFillMesh && currentFillMesh.material) {
@@ -431,6 +474,13 @@ document.addEventListener("DOMContentLoaded", () => {
     currentBounds = null;
     savedLocalBounds = null;
     conversionResult.hidden = true;
+    removeSplitPlanePreview();
+    moldPanelVisible = false;
+    if (moldPanel) moldPanel.style.display = "none";
+    if (moldToggleBtn) {
+      moldToggleBtn.classList.remove("is-active");
+      moldToggleBtn.setAttribute("aria-pressed", "false");
+    }
     updateExportUiState();
     updateTransformRowState();
   }
@@ -445,6 +495,8 @@ document.addEventListener("DOMContentLoaded", () => {
     if (dimXInput) dimXInput.disabled = !hasModel;
     if (dimYInput) dimYInput.disabled = !hasModel;
     if (dimZInput) dimZInput.disabled = !hasModel;
+    if (moldToggleBtn) moldToggleBtn.disabled = !hasModel;
+    if (sliceToggleBtn) sliceToggleBtn.disabled = !hasModel;
     if (!hasModel) {
       if (dimXInput) dimXInput.value = "";
       if (dimYInput) dimYInput.value = "";
@@ -456,6 +508,20 @@ document.addEventListener("DOMContentLoaded", () => {
         rotateToggleBtn.classList.remove("is-active");
       }
       resetRotationInputs();
+      if (moldPanel) moldPanel.style.display = "none";
+      if (moldToggleBtn) {
+        moldToggleBtn.setAttribute("aria-pressed", "false");
+        moldToggleBtn.classList.remove("is-active");
+      }
+      moldPanelVisible = false;
+      removeSplitPlanePreview();
+      if (slicePanel) slicePanel.style.display = "none";
+      if (sliceToggleBtn) {
+        sliceToggleBtn.setAttribute("aria-pressed", "false");
+        sliceToggleBtn.classList.remove("is-active");
+      }
+      slicePanelVisible = false;
+      removeSliceClipping();
     }
     updateBboxPreview();
   }
@@ -604,6 +670,13 @@ document.addEventListener("DOMContentLoaded", () => {
         scaleDisplay.textContent = "—";
       }
     }
+
+    // Re-clamp slice position to new bounds after transform change
+    if (sliceActive) {
+      const range = getSliceAxisRange();
+      slicePosition = Math.max(range.min + 0.1, Math.min(range.max - 0.1, slicePosition));
+      updateSlicePreviewPosition(slicePosition);
+    }
   }
 
   // Tests all 6 axis-aligned face-down orientations, picks the one with the
@@ -701,6 +774,501 @@ document.addEventListener("DOMContentLoaded", () => {
     rebuildModelFromSettings();
     resetRotationInputs();
     setStatus(`Rotated ${rx}° X, ${ry}° Y, ${rz}° Z.`);
+  }
+
+  // ── Mold generator ────────────────────────────────────────────────────
+
+  function createSplitPlanePreview() {
+    if (!currentBounds || !currentFillMesh) return;
+
+    const size = new THREE.Vector3();
+    currentBounds.getSize(size);
+    const margin = 5;
+    const planeWidth = size.x + margin * 2;
+    const planeDepth = size.z + margin * 2;
+
+    if (moldSplitPlane) {
+      moldSplitPlane.geometry.dispose();
+      moldSplitPlane.geometry = new THREE.PlaneGeometry(planeWidth, planeDepth);
+    } else {
+      const geo = new THREE.PlaneGeometry(planeWidth, planeDepth);
+      const mat = new THREE.MeshBasicMaterial({
+        color: 0x0f6e8c,
+        opacity: 0.25,
+        transparent: true,
+        side: THREE.DoubleSide,
+        depthWrite: false
+      });
+      moldSplitPlane = new THREE.Mesh(geo, mat);
+      moldSplitPlane.rotation.x = -Math.PI / 2; // lay flat on XZ
+      scene.add(moldSplitPlane);
+    }
+
+    const center = new THREE.Vector3();
+    currentBounds.getCenter(center);
+    moldSplitPlane.position.set(center.x, moldSplitY, center.z);
+    moldSplitPlane.visible = true;
+  }
+
+  function updateSplitPlanePosition(yValue) {
+    if (!currentBounds) return;
+    yValue = Math.max(currentBounds.min.y + 0.1, Math.min(currentBounds.max.y - 0.1, yValue));
+    moldSplitY = yValue;
+    if (moldSplitPlane) {
+      moldSplitPlane.position.y = yValue;
+    }
+    if (moldSplitSlider) {
+      moldSplitSlider.value = String(yValue);
+    }
+    if (moldSplitValue) {
+      moldSplitValue.textContent = yValue.toFixed(1) + " mm";
+    }
+  }
+
+  function removeSplitPlanePreview() {
+    if (moldSplitPlane) {
+      scene.remove(moldSplitPlane);
+      moldSplitPlane.geometry.dispose();
+      moldSplitPlane.material.dispose();
+      moldSplitPlane = null;
+    }
+  }
+
+  function initMoldControls() {
+    if (!currentBounds) return;
+    const minY = currentBounds.min.y;
+    const maxY = currentBounds.max.y;
+    const midY = (minY + maxY) / 2;
+
+    if (moldSplitSlider) {
+      moldSplitSlider.min = minY.toFixed(1);
+      moldSplitSlider.max = maxY.toFixed(1);
+      moldSplitSlider.step = "0.1";
+      moldSplitSlider.value = midY.toFixed(1);
+    }
+
+    moldSplitY = midY;
+    if (moldSplitValue) {
+      moldSplitValue.textContent = midY.toFixed(1) + " mm";
+    }
+
+    createSplitPlanePreview();
+  }
+
+  function setupSplitPlaneDrag() {
+    const raycaster = new THREE.Raycaster();
+    const mouse = new THREE.Vector2();
+    let dragStartY = 0;
+    let dragPlaneWorldY = 0;
+
+    renderer.domElement.addEventListener("pointerdown", (event) => {
+      if (!moldSplitPlane || !moldPanelVisible || !moldSplitPlane.visible) return;
+      mouse.x = (event.offsetX / renderer.domElement.clientWidth) * 2 - 1;
+      mouse.y = -(event.offsetY / renderer.domElement.clientHeight) * 2 + 1;
+      raycaster.setFromCamera(mouse, camera);
+      const hits = raycaster.intersectObject(moldSplitPlane);
+      if (hits.length > 0) {
+        isDraggingSplitPlane = true;
+        dragStartY = event.clientY;
+        dragPlaneWorldY = moldSplitY;
+        controls.enabled = false;
+        event.preventDefault();
+      }
+    });
+
+    renderer.domElement.addEventListener("pointermove", (event) => {
+      if (!isDraggingSplitPlane) return;
+      // Compute world-space Y per pixel at current zoom
+      const bounds = currentBounds;
+      if (!bounds) return;
+      const heightRange = bounds.max.y - bounds.min.y;
+      const canvasHeight = renderer.domElement.clientHeight;
+      const sensitivity = heightRange / (canvasHeight * 0.4);
+      const deltaPixels = event.clientY - dragStartY;
+      const newY = dragPlaneWorldY - deltaPixels * sensitivity;
+      updateSplitPlanePosition(newY);
+    });
+
+    window.addEventListener("pointerup", () => {
+      if (isDraggingSplitPlane) {
+        isDraggingSplitPlane = false;
+        controls.enabled = true;
+      }
+    });
+  }
+
+  async function generateMold() {
+    if (!currentFillMesh || !currentBounds) {
+      setStatus("Load a model before generating a mold.");
+      return;
+    }
+
+    const wallThickness = parseFloat(moldWallInput.value) || 10;
+    const clearance = parseFloat(moldClearanceInput.value) || 0;
+    const splitHeight = moldSplitY;
+    const pinDiameter = parseFloat(moldPinDiameterInput.value) || 5;
+    const pinInset = parseFloat(moldPinInsetInput.value) || 8;
+    const pinTolerance = parseFloat(moldPinToleranceInput.value);
+    const sprueDiameter = parseFloat(moldSprueDiameterInput.value) || 6;
+    const sprueEnabled = moldSprueEnabledCheckbox ? moldSprueEnabledCheckbox.checked : true;
+
+    // Build scaled STL blob (same as STEP export)
+    const scaledGeom = buildScaledExportGeometry();
+    const exportMesh = scaledGeom
+      ? new THREE.Mesh(scaledGeom, currentFillMesh.material)
+      : currentFillMesh;
+    const exporter = new THREE.STLExporter();
+    const stlContent = exporter.parse(exportMesh, { binary: false });
+    if (scaledGeom) scaledGeom.dispose();
+    const stlBlob = new Blob([stlContent], { type: "model/stl" });
+
+    const stem = sanitizeFileStem(currentFileStem);
+    const params = new URLSearchParams({
+      filename: `${stem}.stl`,
+      wallThickness: String(wallThickness),
+      clearance: String(clearance),
+      splitHeight: String(splitHeight),
+      pinDiameter: String(pinDiameter),
+      pinInset: String(pinInset),
+      pinTolerance: String(isNaN(pinTolerance) ? 0.4 : pinTolerance),
+      sprueDiameter: String(sprueDiameter),
+      sprueEnabled: String(sprueEnabled)
+    });
+
+    setStatus("Generating mold halves via FreeCAD…");
+    conversionSpinner.hidden = false;
+    generateMoldBtn.disabled = true;
+    generateMoldBtn.textContent = "Generating…";
+
+    try {
+      const url = `${CONVERTER_API_BASE}/api/convert/stl-to-mold?${params}`;
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/octet-stream" },
+        body: stlBlob
+      });
+
+      if (!response.ok) {
+        let details = "Mold generation failed.";
+        try {
+          const payload = await response.json();
+          if (payload && payload.error) details = payload.error;
+        } catch (_) {}
+        throw new Error(details);
+      }
+
+      const zipBuffer = await response.arrayBuffer();
+      const blob = new Blob([zipBuffer], { type: "application/zip" });
+      const objectUrl = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = objectUrl;
+      anchor.download = `${stem}-mold.zip`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(objectUrl);
+
+      setStatus(`Mold exported as ${stem}-mold.zip (top + bottom halves).`);
+    } catch (error) {
+      console.error(error);
+      const msg = String(error.message || "").toLowerCase();
+      const friendlyError = msg.includes("failed to fetch")
+        ? `Converter service not reachable at ${CONVERTER_API_BASE}. Run npm run convert:start.`
+        : error.message;
+      setStatus(`Mold generation failed: ${friendlyError}`);
+    } finally {
+      conversionSpinner.hidden = true;
+      generateMoldBtn.disabled = false;
+      generateMoldBtn.textContent = "Generate Mold";
+    }
+  }
+
+  // ── Slice / cross-section view ──────────────────────────────────────────
+
+  function getSliceAxisNormal() {
+    const sign = sliceFlipped ? -1 : 1;
+    if (sliceAxis === "x") return new THREE.Vector3(sign, 0, 0);
+    if (sliceAxis === "z") return new THREE.Vector3(0, 0, sign);
+    return new THREE.Vector3(0, sign, 0);
+  }
+
+  function getSliceAxisRange() {
+    if (!currentBounds) return { min: 0, max: 100 };
+    if (sliceAxis === "x") return { min: currentBounds.min.x, max: currentBounds.max.x };
+    if (sliceAxis === "z") return { min: currentBounds.min.z, max: currentBounds.max.z };
+    return { min: currentBounds.min.y, max: currentBounds.max.y };
+  }
+
+  function getCapColor(partColorHex) {
+    const c = new THREE.Color(partColorHex);
+    const hsl = {};
+    c.getHSL(hsl);
+    hsl.s = Math.max(0, hsl.s - 0.3);
+    hsl.l = Math.min(1, hsl.l + 0.15);
+    c.setHSL(hsl.h, hsl.s, hsl.l);
+    return c.getHex();
+  }
+
+  function initSliceClipPlane() {
+    if (!currentFillMesh) return;
+    renderer.localClippingEnabled = true;
+
+    const normal = getSliceAxisNormal();
+    sliceClipPlane = new THREE.Plane(normal, -slicePosition * (sliceFlipped ? -1 : 1));
+
+    const planes = [sliceClipPlane];
+    currentFillMesh.material.clippingPlanes = planes;
+    currentWireMesh.material.clippingPlanes = planes;
+    currentEdgeLines.material.clippingPlanes = planes;
+    sliceActive = true;
+  }
+
+  function updateSliceClipPlane() {
+    if (!sliceClipPlane) return;
+    const normal = getSliceAxisNormal();
+    sliceClipPlane.normal.copy(normal);
+    // THREE.Plane: normal.dot(point) + constant = 0
+    // For normal=(0,1,0) at position p: constant = -p
+    // For normal=(0,-1,0) at position p: constant = p
+    sliceClipPlane.constant = sliceFlipped ? slicePosition : -slicePosition;
+  }
+
+  function disposeSlicePreviewPlane() {
+    if (!slicePreviewPlane) return;
+    scene.remove(slicePreviewPlane);
+    // Dispose children
+    slicePreviewPlane.children.forEach(child => {
+      if (child.geometry) child.geometry.dispose();
+      if (child.material) child.material.dispose();
+    });
+    slicePreviewPlane = null;
+  }
+
+  function createSlicePreviewPlane() {
+    if (!currentBounds || !currentFillMesh) return;
+    const size = new THREE.Vector3();
+    currentBounds.getSize(size);
+    const margin = 5;
+
+    // Determine plane dimensions based on axis
+    let planeW, planeH;
+    if (sliceAxis === "x") { planeW = size.z + margin * 2; planeH = size.y + margin * 2; }
+    else if (sliceAxis === "z") { planeW = size.x + margin * 2; planeH = size.y + margin * 2; }
+    else { planeW = size.x + margin * 2; planeH = size.z + margin * 2; }
+
+    disposeSlicePreviewPlane();
+
+    slicePreviewPlane = new THREE.Group();
+
+    // Invisible hit mesh for raycaster-based drag interaction
+    const hitGeo = new THREE.PlaneGeometry(planeW, planeH);
+    const hitMat = new THREE.MeshBasicMaterial({
+      visible: false,
+      side: THREE.DoubleSide
+    });
+    const hitMesh = new THREE.Mesh(hitGeo, hitMat);
+    slicePreviewPlane.add(hitMesh);
+
+    // Visible border-only outline (LineLoop of the rectangle edges)
+    const hw = planeW / 2, hh = planeH / 2;
+    const borderGeo = new THREE.BufferGeometry().setFromPoints([
+      new THREE.Vector3(-hw, -hh, 0),
+      new THREE.Vector3( hw, -hh, 0),
+      new THREE.Vector3( hw,  hh, 0),
+      new THREE.Vector3(-hw,  hh, 0)
+    ]);
+    const borderMat = new THREE.LineBasicMaterial({ color: 0x8c3a0f, linewidth: 1 });
+    const borderLine = new THREE.LineLoop(borderGeo, borderMat);
+    slicePreviewPlane.add(borderLine);
+
+    // Orient perpendicular to the slice axis
+    if (sliceAxis === "y") slicePreviewPlane.rotation.set(-Math.PI / 2, 0, 0);
+    else if (sliceAxis === "x") slicePreviewPlane.rotation.set(0, Math.PI / 2, 0);
+    // z-axis: default orientation is correct
+
+    const center = new THREE.Vector3();
+    currentBounds.getCenter(center);
+    if (sliceAxis === "x") slicePreviewPlane.position.set(slicePosition, center.y, center.z);
+    else if (sliceAxis === "z") slicePreviewPlane.position.set(center.x, center.y, slicePosition);
+    else slicePreviewPlane.position.set(center.x, slicePosition, center.z);
+
+    scene.add(slicePreviewPlane);
+  }
+
+  function updateSlicePreviewPosition(value) {
+    if (!currentBounds) return;
+    const range = getSliceAxisRange();
+    value = Math.max(range.min + 0.1, Math.min(range.max - 0.1, value));
+    slicePosition = value;
+
+    if (slicePreviewPlane) {
+      if (sliceAxis === "x") slicePreviewPlane.position.x = value;
+      else if (sliceAxis === "z") slicePreviewPlane.position.z = value;
+      else slicePreviewPlane.position.y = value;
+    }
+
+    if (slicePositionSlider) slicePositionSlider.value = String(value);
+    if (slicePositionValue) slicePositionValue.textContent = value.toFixed(1) + " mm";
+
+    updateSliceClipPlane();
+  }
+
+  function createSliceBackfaceMesh() {
+    if (!currentFillMesh || !sliceClipPlane) return;
+
+    // Back-face mesh: shows interior surfaces where the clip plane cuts.
+    // Depth testing against the front-face model ensures back faces only
+    // appear at the exposed cross-section, not behind the exterior surface.
+    const geom = currentFillMesh.geometry; // shared reference, no clone
+    const backMat = new THREE.MeshStandardMaterial({
+      color: getCapColor(currentPartColor),
+      roughness: 0.5,
+      metalness: 0.05,
+      side: THREE.BackSide,
+      clippingPlanes: [sliceClipPlane]
+    });
+    sliceStencilBackMesh = new THREE.Mesh(geom, backMat);
+    currentModelRoot.add(sliceStencilBackMesh);
+  }
+
+  function removeSliceClipping() {
+    // Remove clipping from model materials (guard against already-disposed)
+    try {
+      if (currentFillMesh && currentFillMesh.material) currentFillMesh.material.clippingPlanes = [];
+      if (currentWireMesh && currentWireMesh.material) currentWireMesh.material.clippingPlanes = [];
+      if (currentEdgeLines && currentEdgeLines.material) currentEdgeLines.material.clippingPlanes = [];
+    } catch (_) {}
+
+    // Dispose back-face mesh
+    if (sliceStencilBackMesh) {
+      if (currentModelRoot) currentModelRoot.remove(sliceStencilBackMesh);
+      sliceStencilBackMesh.material.dispose();
+      sliceStencilBackMesh = null;
+    }
+
+    // Dispose preview plane
+    disposeSlicePreviewPlane();
+
+    sliceClipPlane = null;
+    sliceActive = false;
+    renderer.localClippingEnabled = false;
+  }
+
+  function rebuildSliceForAxisChange(newAxis) {
+    sliceAxis = newAxis;
+    const range = getSliceAxisRange();
+    const mid = (range.min + range.max) / 2;
+
+    if (slicePositionSlider) {
+      slicePositionSlider.min = String(range.min);
+      slicePositionSlider.max = String(range.max);
+      slicePositionSlider.value = String(mid);
+    }
+
+    slicePosition = mid;
+
+    // Rebuild preview plane for new orientation
+    disposeSlicePreviewPlane();
+    createSlicePreviewPlane();
+
+    // Rebuild back-face mesh for new orientation
+    if (sliceStencilBackMesh) {
+      currentModelRoot.remove(sliceStencilBackMesh);
+      sliceStencilBackMesh.material.dispose();
+      sliceStencilBackMesh = null;
+    }
+
+    updateSliceClipPlane();
+    createSliceBackfaceMesh();
+
+    if (slicePositionValue) slicePositionValue.textContent = mid.toFixed(1) + " mm";
+  }
+
+  function initSliceControls() {
+    if (!currentBounds || !currentFillMesh) return;
+
+    const range = getSliceAxisRange();
+    const mid = (range.min + range.max) / 2;
+    slicePosition = mid;
+
+    if (slicePositionSlider) {
+      slicePositionSlider.min = String(range.min);
+      slicePositionSlider.max = String(range.max);
+      slicePositionSlider.step = String(Math.max(0.1, (range.max - range.min) / 500));
+      slicePositionSlider.value = String(mid);
+    }
+    if (slicePositionValue) slicePositionValue.textContent = mid.toFixed(1) + " mm";
+
+    initSliceClipPlane();
+    createSlicePreviewPlane();
+    createSliceBackfaceMesh();
+  }
+
+  function setupSlicePlaneDrag() {
+    const raycaster = new THREE.Raycaster();
+    const mouse = new THREE.Vector2();
+    let dragStartX = 0;
+    let dragStartY = 0;
+    let dragStartValue = 0;
+
+    renderer.domElement.addEventListener("pointerdown", (event) => {
+      if (!slicePreviewPlane || !slicePanelVisible || !sliceActive) return;
+      mouse.x = (event.offsetX / renderer.domElement.clientWidth) * 2 - 1;
+      mouse.y = -(event.offsetY / renderer.domElement.clientHeight) * 2 + 1;
+      raycaster.setFromCamera(mouse, camera);
+      const hits = raycaster.intersectObject(slicePreviewPlane, true);
+      if (hits.length > 0) {
+        isDraggingSlicePlane = true;
+        dragStartX = event.clientX;
+        dragStartY = event.clientY;
+        dragStartValue = slicePosition;
+        controls.enabled = false;
+        event.preventDefault();
+      }
+    });
+
+    renderer.domElement.addEventListener("pointermove", (event) => {
+      if (!isDraggingSlicePlane || !currentBounds) return;
+
+      // Project the slice axis to screen space to determine drag sensitivity
+      const center = new THREE.Vector3();
+      currentBounds.getCenter(center);
+      const range = getSliceAxisRange();
+      const axisLen = range.max - range.min;
+      const axisDir = new THREE.Vector3(
+        sliceAxis === "x" ? 1 : 0,
+        sliceAxis === "y" ? 1 : 0,
+        sliceAxis === "z" ? 1 : 0
+      );
+
+      const p1 = center.clone().project(camera);
+      const p2 = center.clone().addScaledVector(axisDir, axisLen).project(camera);
+
+      const canvasW = renderer.domElement.clientWidth;
+      const canvasH = renderer.domElement.clientHeight;
+      const sx1 = (p1.x + 1) * canvasW / 2;
+      const sy1 = (1 - p1.y) * canvasH / 2;
+      const sx2 = (p2.x + 1) * canvasW / 2;
+      const sy2 = (1 - p2.y) * canvasH / 2;
+
+      const screenDx = sx2 - sx1;
+      const screenDy = sy2 - sy1;
+      const screenLen = Math.sqrt(screenDx * screenDx + screenDy * screenDy);
+      if (screenLen < 1) return; // axis perpendicular to screen
+
+      const mouseDx = event.clientX - dragStartX;
+      const mouseDy = event.clientY - dragStartY;
+      const projected = (mouseDx * screenDx + mouseDy * screenDy) / screenLen;
+      const worldDelta = (projected / screenLen) * axisLen;
+      updateSlicePreviewPosition(dragStartValue + worldDelta);
+    });
+
+    window.addEventListener("pointerup", () => {
+      if (isDraggingSlicePlane) {
+        isDraggingSlicePlane = false;
+        controls.enabled = true;
+      }
+    });
   }
 
   // Crease angle for smooth-shading: faces whose dihedral exceeds this will
@@ -989,6 +1557,12 @@ document.addEventListener("DOMContentLoaded", () => {
     currentFillMesh.material.flatShading = style === "flat";
     currentFillMesh.material.needsUpdate = true;
 
+    // Back-face interior mesh only meaningful when solid fill is visible
+    if (sliceActive && sliceStencilBackMesh) {
+      const showCap = style !== "wireframe" && sliceCapCheckbox && sliceCapCheckbox.checked;
+      sliceStencilBackMesh.visible = showCap;
+    }
+
     if (announce) {
       setStatus(`View style changed to ${getViewStyleLabel(style)}.`);
     }
@@ -998,6 +1572,9 @@ document.addEventListener("DOMContentLoaded", () => {
     currentPartColor = parseInt(hexString.replace("#", ""), 16);
     if (currentFillMesh && currentFillMesh.material) {
       currentFillMesh.material.color.setHex(currentPartColor);
+    }
+    if (sliceStencilBackMesh && sliceStencilBackMesh.material) {
+      sliceStencilBackMesh.material.color.setHex(getCapColor(currentPartColor));
     }
   }
 
@@ -1059,6 +1636,12 @@ document.addEventListener("DOMContentLoaded", () => {
       return;
     }
 
+    // Save slice state so it survives the clearCurrentModel() inside applyGeometryToScene()
+    const wasSliceActive = slicePanelVisible;
+    const savedSliceAxis = sliceAxis;
+    const savedSliceFlipped = sliceFlipped;
+    const savedSlicePos = slicePosition;
+
     const bounds = getRefinementBounds();
     const requested = Number(refinementSlider.value) || 1;
     const safeMultiplier = normalizeRequestedMultiplier(requested, bounds);
@@ -1073,6 +1656,25 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     applyGeometryToScene(geometry, currentFileName);
+
+    // Restore slice view if it was active before rebuild
+    if (wasSliceActive) {
+      slicePanelVisible = true;
+      sliceAxis = savedSliceAxis;
+      sliceFlipped = savedSliceFlipped;
+      if (slicePanel) slicePanel.style.display = "";
+      if (sliceToggleBtn) {
+        sliceToggleBtn.classList.add("is-active");
+        sliceToggleBtn.setAttribute("aria-pressed", "true");
+      }
+      if (sliceFlipCheckbox) sliceFlipCheckbox.checked = savedSliceFlipped;
+      if (sliceAxisXRadio && savedSliceAxis === "x") sliceAxisXRadio.checked = true;
+      if (sliceAxisYRadio && savedSliceAxis === "y") sliceAxisYRadio.checked = true;
+      if (sliceAxisZRadio && savedSliceAxis === "z") sliceAxisZRadio.checked = true;
+      initSliceControls();
+      // Try to restore previous position (clamped to new bounds)
+      updateSlicePreviewPosition(savedSlicePos);
+    }
 
     if (wasLimited) {
       setStatus(`Triangle multiplier limited to ${safeMultiplier.toFixed(2)}x for this model.`);
@@ -1149,6 +1751,10 @@ document.addEventListener("DOMContentLoaded", () => {
     currentFileName = fileName;
     scaleX = scaleY = scaleZ = 1.0;  // reset scale for every new file load
     bboxOverlayActive = false;
+
+    // New file load — ensure slice state is not preserved across file loads
+    slicePanelVisible = false;
+    sliceActive = false;
 
     const bounds = getRefinementBounds();
     const startingMultiplier = normalizeRequestedMultiplier(1, bounds);
@@ -1651,6 +2257,88 @@ document.addEventListener("DOMContentLoaded", () => {
       }
     });
   });
+
+  // ── Mold generator event listeners ──────────────────────────────────
+
+  if (moldToggleBtn && moldPanel) {
+    moldToggleBtn.addEventListener("click", () => {
+      if (!currentFillMesh) return;
+      moldPanelVisible = !moldPanelVisible;
+      moldPanel.style.display = moldPanelVisible ? "" : "none";
+      moldToggleBtn.setAttribute("aria-pressed", String(moldPanelVisible));
+      moldToggleBtn.classList.toggle("is-active", moldPanelVisible);
+      if (moldPanelVisible) {
+        initMoldControls();
+      } else {
+        removeSplitPlanePreview();
+      }
+    });
+  }
+
+  if (moldSplitSlider) {
+    moldSplitSlider.addEventListener("input", () => {
+      updateSplitPlanePosition(parseFloat(moldSplitSlider.value));
+    });
+  }
+
+  if (moldSprueEnabledCheckbox) {
+    moldSprueEnabledCheckbox.addEventListener("change", () => {
+      if (moldSprueDiameterInput) {
+        moldSprueDiameterInput.disabled = !moldSprueEnabledCheckbox.checked;
+      }
+    });
+  }
+
+  if (generateMoldBtn) {
+    generateMoldBtn.addEventListener("click", generateMold);
+  }
+
+  setupSplitPlaneDrag();
+
+  // ── Slice view event listeners ──────────────────────────────────────
+
+  if (sliceToggleBtn && slicePanel) {
+    sliceToggleBtn.addEventListener("click", () => {
+      if (!currentFillMesh) return;
+      slicePanelVisible = !slicePanelVisible;
+      slicePanel.style.display = slicePanelVisible ? "" : "none";
+      sliceToggleBtn.setAttribute("aria-pressed", String(slicePanelVisible));
+      sliceToggleBtn.classList.toggle("is-active", slicePanelVisible);
+      if (slicePanelVisible) {
+        initSliceControls();
+      } else {
+        removeSliceClipping();
+      }
+    });
+  }
+
+  if (slicePositionSlider) {
+    slicePositionSlider.addEventListener("input", () => {
+      updateSlicePreviewPosition(parseFloat(slicePositionSlider.value));
+    });
+  }
+
+  document.querySelectorAll('input[name="sliceAxis"]').forEach(radio => {
+    radio.addEventListener("change", (e) => {
+      if (sliceActive) rebuildSliceForAxisChange(e.target.value);
+    });
+  });
+
+  if (sliceFlipCheckbox) {
+    sliceFlipCheckbox.addEventListener("change", () => {
+      sliceFlipped = sliceFlipCheckbox.checked;
+      updateSliceClipPlane();
+    });
+  }
+
+  if (sliceCapCheckbox) {
+    sliceCapCheckbox.addEventListener("change", () => {
+      const show = sliceCapCheckbox.checked;
+      if (sliceStencilBackMesh) sliceStencilBackMesh.visible = show;
+    });
+  }
+
+  setupSlicePlaneDrag();
 
   if (uniformScaleCheckbox) {
     uniformScaleCheckbox.addEventListener("change", () => {

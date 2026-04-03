@@ -21,6 +21,11 @@ tmp-*.err.log
 
 # Environment / secrets
 .env
+joebox_info.txt
+
+# Local artifacts
+tools/__pycache__/
+.claude/ImageInput/
 
 # IDE
 .idea/

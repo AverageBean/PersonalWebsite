@@ -216,7 +216,7 @@ document.addEventListener("DOMContentLoaded", () => {
   let isDraggingSlicePlane = false;
   let sliceClipPlane = null;
   let slicePreviewPlane = null;
-  let sliceStencilBackMesh = null;
+  let sliceInteriorMesh = null;
 
   function resizeRenderer() {
     const width = viewerCanvas.clientWidth;
@@ -1113,7 +1113,7 @@ document.addEventListener("DOMContentLoaded", () => {
     updateSliceClipPlane();
   }
 
-  function createSliceBackfaceMesh() {
+  function createSliceInteriorMesh() {
     if (!currentFillMesh || !sliceClipPlane) return;
 
     // Back-face mesh: shows interior surfaces where the clip plane cuts.
@@ -1127,8 +1127,8 @@ document.addEventListener("DOMContentLoaded", () => {
       side: THREE.BackSide,
       clippingPlanes: [sliceClipPlane]
     });
-    sliceStencilBackMesh = new THREE.Mesh(geom, backMat);
-    currentModelRoot.add(sliceStencilBackMesh);
+    sliceInteriorMesh = new THREE.Mesh(geom, backMat);
+    currentModelRoot.add(sliceInteriorMesh);
   }
 
   function removeSliceClipping() {
@@ -1140,10 +1140,10 @@ document.addEventListener("DOMContentLoaded", () => {
     } catch (_) {}
 
     // Dispose back-face mesh
-    if (sliceStencilBackMesh) {
-      if (currentModelRoot) currentModelRoot.remove(sliceStencilBackMesh);
-      sliceStencilBackMesh.material.dispose();
-      sliceStencilBackMesh = null;
+    if (sliceInteriorMesh) {
+      if (currentModelRoot) currentModelRoot.remove(sliceInteriorMesh);
+      sliceInteriorMesh.material.dispose();
+      sliceInteriorMesh = null;
     }
 
     // Dispose preview plane
@@ -1172,14 +1172,14 @@ document.addEventListener("DOMContentLoaded", () => {
     createSlicePreviewPlane();
 
     // Rebuild back-face mesh for new orientation
-    if (sliceStencilBackMesh) {
-      currentModelRoot.remove(sliceStencilBackMesh);
-      sliceStencilBackMesh.material.dispose();
-      sliceStencilBackMesh = null;
+    if (sliceInteriorMesh) {
+      currentModelRoot.remove(sliceInteriorMesh);
+      sliceInteriorMesh.material.dispose();
+      sliceInteriorMesh = null;
     }
 
     updateSliceClipPlane();
-    createSliceBackfaceMesh();
+    createSliceInteriorMesh();
 
     if (slicePositionValue) slicePositionValue.textContent = mid.toFixed(1) + " mm";
   }
@@ -1201,7 +1201,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
     initSliceClipPlane();
     createSlicePreviewPlane();
-    createSliceBackfaceMesh();
+    createSliceInteriorMesh();
   }
 
   function setupSlicePlaneDrag() {
@@ -1558,9 +1558,9 @@ document.addEventListener("DOMContentLoaded", () => {
     currentFillMesh.material.needsUpdate = true;
 
     // Back-face interior mesh only meaningful when solid fill is visible
-    if (sliceActive && sliceStencilBackMesh) {
+    if (sliceActive && sliceInteriorMesh) {
       const showCap = style !== "wireframe" && sliceCapCheckbox && sliceCapCheckbox.checked;
-      sliceStencilBackMesh.visible = showCap;
+      sliceInteriorMesh.visible = showCap;
     }
 
     if (announce) {
@@ -1573,8 +1573,8 @@ document.addEventListener("DOMContentLoaded", () => {
     if (currentFillMesh && currentFillMesh.material) {
       currentFillMesh.material.color.setHex(currentPartColor);
     }
-    if (sliceStencilBackMesh && sliceStencilBackMesh.material) {
-      sliceStencilBackMesh.material.color.setHex(getCapColor(currentPartColor));
+    if (sliceInteriorMesh && sliceInteriorMesh.material) {
+      sliceInteriorMesh.material.color.setHex(getCapColor(currentPartColor));
     }
   }
 
@@ -2306,8 +2306,10 @@ document.addEventListener("DOMContentLoaded", () => {
       sliceToggleBtn.classList.toggle("is-active", slicePanelVisible);
       if (slicePanelVisible) {
         initSliceControls();
+        setStatus("Cross-section enabled — drag the cut plane or use the slider to reposition.");
       } else {
         removeSliceClipping();
+        setStatus("Cross-section disabled.");
       }
     });
   }
@@ -2320,7 +2322,10 @@ document.addEventListener("DOMContentLoaded", () => {
 
   document.querySelectorAll('input[name="sliceAxis"]').forEach(radio => {
     radio.addEventListener("change", (e) => {
-      if (sliceActive) rebuildSliceForAxisChange(e.target.value);
+      if (sliceActive) {
+        rebuildSliceForAxisChange(e.target.value);
+        setStatus(`Cross-section axis changed to ${e.target.value.toUpperCase()}.`);
+      }
     });
   });
 
@@ -2328,13 +2333,14 @@ document.addEventListener("DOMContentLoaded", () => {
     sliceFlipCheckbox.addEventListener("change", () => {
       sliceFlipped = sliceFlipCheckbox.checked;
       updateSliceClipPlane();
+      setStatus(sliceFlipped ? "Showing opposite side of cut." : "Showing default side of cut.");
     });
   }
 
   if (sliceCapCheckbox) {
     sliceCapCheckbox.addEventListener("change", () => {
       const show = sliceCapCheckbox.checked;
-      if (sliceStencilBackMesh) sliceStencilBackMesh.visible = show;
+      if (sliceInteriorMesh) sliceInteriorMesh.visible = show;
     });
   }
 

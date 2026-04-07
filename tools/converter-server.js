@@ -48,6 +48,7 @@ const MAX_UPLOAD_BYTES = Number(process.env.CAD_CONVERTER_MAX_UPLOAD || 120 * 10
 const converterScript = path.join(__dirname, "convert-sldprt-with-freecad.py");
 const stepConverterScript = path.join(__dirname, "convert-stl-to-step-with-freecad.py");
 const parametricConverterScript = path.join(__dirname, "convert-stl-to-step-parametric-with-freecad.py");
+const cadToStlScript = path.join(__dirname, "convert-cad-to-stl-with-freecad.py");
 const moldGeneratorScript = path.join(__dirname, "generate-mold-with-freecad.py");
 const CLOUDCONVERT_API_KEY = process.env.CLOUDCONVERT_API_KEY || "";
 const CLOUDCONVERT_API_BASE = process.env.CLOUDCONVERT_API_BASE || "https://api.cloudconvert.com/v2";
@@ -671,7 +672,8 @@ async function handleStlToStepParametricConversion(req, res) {
 
     const coverageMatch = result.stdout.match(/coverage=(\d+\.?\d*)%/);
     const cylMatch      = result.stdout.match(/\((\d+) cyl,/);
-    const planeMatch    = result.stdout.match(/(\d+) plane\)/);
+    const planeMatch    = result.stdout.match(/(\d+) plane,?\s/);
+    const torusMatch    = result.stdout.match(/(\d+) torus/);
 
     const totalMatch  = result.stdout.match(/loaded (\d+) triangles/);
     const horizMatch  = result.stdout.match(/(\d+) horiz \(cyl\)/);
@@ -692,6 +694,7 @@ async function handleStlToStepParametricConversion(req, res) {
       "X-Coverage":            coverageMatch ? coverageMatch[1] : "",
       "X-Detected-Cylinders":  cylMatch      ? cylMatch[1]      : "",
       "X-Detected-Planes":     planeMatch    ? planeMatch[1]    : "",
+      "X-Detected-Tori":       torusMatch    ? torusMatch[1]    : "",
       "X-Pct-Cyl":             pct(horiz,  total),
       "X-Pct-Plane":           pct(vert,   total),
       "X-Pct-Fillet":          pct(fillet, total)
@@ -820,6 +823,89 @@ function runFreeCadMoldGeneration(freeCadRuntime, inputPath, outputDir, paramsPa
       reject(new Error(message));
     });
   });
+}
+
+function runFreeCadCadToStl(freeCadRuntime, inputPath, outputPath) {
+  return new Promise((resolve, reject) => {
+    const commandArgs = [...(freeCadRuntime.args || []), cadToStlScript, inputPath, outputPath];
+    const processHandle = spawn(freeCadRuntime.executable, commandArgs, {
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+
+    const stdoutChunks = [];
+    const stderrChunks = [];
+
+    processHandle.stdout.on("data", chunk => stdoutChunks.push(chunk));
+    processHandle.stderr.on("data", chunk => stderrChunks.push(chunk));
+
+    processHandle.on("error", error => reject(error));
+
+    processHandle.on("close", code => {
+      const stdout = Buffer.concat(stdoutChunks).toString("utf8").trim();
+      const stderr = Buffer.concat(stderrChunks).toString("utf8").trim();
+
+      if (code === 0) {
+        resolve({ stdout, stderr });
+        return;
+      }
+
+      const message = stderr || stdout || `FreeCAD exited with code ${code}.`;
+      reject(new Error(message));
+    });
+  });
+}
+
+const CAD_EXTENSIONS = new Set([".step", ".stp", ".iges", ".igs", ".brep", ".brp"]);
+
+async function handleCadToStlConversion(req, res) {
+  const incomingName = parseIncomingFilename(req.url);
+  const ext = path.extname(incomingName).toLowerCase();
+  if (!CAD_EXTENSIONS.has(ext)) {
+    sendJson(res, 400, {
+      error: `Unsupported file extension: ${ext}. Accepted: ${[...CAD_EXTENSIONS].join(", ")}`
+    });
+    return;
+  }
+
+  const freeCadRuntime = detectFreeCadExecutable();
+  if (!freeCadRuntime.executable) {
+    sendJson(res, 500, { error: "FreeCAD is not installed or not found." });
+    return;
+  }
+
+  let tempDir = "";
+  try {
+    const body = await readRequestBody(req);
+    if (!body.length) {
+      sendJson(res, 400, { error: "Upload body is empty." });
+      return;
+    }
+
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cad-to-stl-"));
+    const inputPath = path.join(tempDir, incomingName);
+    const outputName = `${path.basename(incomingName, ext)}.stl`;
+    const outputPath = path.join(tempDir, outputName);
+
+    fs.writeFileSync(inputPath, body);
+    const result = await runFreeCadCadToStl(freeCadRuntime, inputPath, outputPath);
+
+    if (!exists(outputPath)) {
+      throw new Error("FreeCAD did not produce an STL output file.");
+    }
+
+    const outputBuffer = fs.readFileSync(outputPath);
+    sendBinary(res, 200, "model/stl", outputBuffer, outputName, {
+      "X-Converter-Method": "freecad-cad-to-stl"
+    });
+  } catch (error) {
+    sendJson(res, 500, {
+      error: `CAD to STL conversion failed: ${error.message}`
+    });
+  } finally {
+    if (tempDir && exists(tempDir)) {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  }
 }
 
 async function handleStlToMoldGeneration(req, res) {
@@ -1050,6 +1136,11 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (req.method === "POST" && req.url.startsWith("/api/convert/cad-to-stl")) {
+    await handleCadToStlConversion(req, res);
+    return;
+  }
+
   if (req.method === "POST" && req.url.startsWith("/api/convert/stl-to-step-parametric")) {
     await handleStlToStepParametricConversion(req, res);
     return;
@@ -1076,6 +1167,7 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, HOST, () => {
   console.log(`[converter] listening on http://${HOST}:${PORT}`);
   console.log("[converter] endpoint: POST /api/convert/sldprt-to-stl?filename=<name>.sldprt");
+  console.log("[converter] endpoint: POST /api/convert/cad-to-stl?filename=<name>.step|.iges|.brep");
   console.log("[converter] endpoint: POST /api/convert/stl-to-step?filename=<name>.stl");
   console.log("[converter] endpoint: POST /api/convert/stl-to-step-parametric?filename=<name>.stl");
   console.log("[converter] endpoint: POST /api/convert/stl-to-mold?filename=<name>.stl&wallThickness=10&splitHeight=25&...");

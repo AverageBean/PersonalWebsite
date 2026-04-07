@@ -93,7 +93,11 @@ document.addEventListener("DOMContentLoaded", () => {
   const MIN_MULTIPLIER = 0.1;
   const MAX_MULTIPLIER = 16;
   const MULTIPLIER_STEP = 0.1;
-  const SUPPORTED_INPUT_EXTENSIONS = new Set(["stl", "sldprt"]);
+  const SUPPORTED_INPUT_EXTENSIONS = new Set([
+    "stl", "sldprt",
+    "obj", "ply", "gltf", "glb", "3mf",            // client-side loaders
+    "step", "stp", "iges", "igs", "brep", "brp"     // server-side CAD conversion
+  ]);
   const CONVERTER_API_BASE = window.CAD_CONVERTER_URL || "http://127.0.0.1:8090";
   const BACKGROUND_STYLES = {
     lab: {
@@ -186,6 +190,12 @@ document.addEventListener("DOMContentLoaded", () => {
   scene.add(gridHelper);
 
   const stlLoader = new THREE.STLLoader();
+  const objLoader = new THREE.OBJLoader();
+  const plyLoader = new THREE.PLYLoader();
+  const gltfLoader = new THREE.GLTFLoader();
+
+  // Extensions that require server-side conversion to STL via FreeCAD
+  const CAD_EXTENSIONS = new Set(["step", "stp", "iges", "igs", "brep", "brp"]);
   let currentModelRoot = null;
   let currentFillMesh = null;
   let currentWireMesh = null;
@@ -1856,6 +1866,89 @@ document.addEventListener("DOMContentLoaded", () => {
     return message || "Unknown converter error.";
   }
 
+  function extractGeometryFromObject3D(object) {
+    const geometries = [];
+    object.traverse(function (child) {
+      if (child.isMesh && child.geometry) {
+        const cloned = child.geometry.clone();
+        if (child.matrixWorld) {
+          cloned.applyMatrix4(child.matrixWorld);
+        }
+        geometries.push(cloned);
+      }
+    });
+    if (geometries.length === 0) {
+      return null;
+    }
+    if (geometries.length === 1) {
+      return geometries[0];
+    }
+    // Merge all geometries into one
+    const merged = geometries[0];
+    for (let i = 1; i < geometries.length; i++) {
+      const other = geometries[i];
+      const positions = [];
+      const normals = [];
+      for (const geom of [merged, other]) {
+        const nonIndexed = geom.index ? geom.toNonIndexed() : geom;
+        positions.push(nonIndexed.getAttribute("position").array);
+        if (nonIndexed.getAttribute("normal")) {
+          normals.push(nonIndexed.getAttribute("normal").array);
+        }
+      }
+      const totalLen = positions.reduce(function (s, a) { return s + a.length; }, 0);
+      const mergedPos = new Float32Array(totalLen);
+      let offset = 0;
+      for (const arr of positions) {
+        mergedPos.set(arr, offset);
+        offset += arr.length;
+      }
+      const combinedGeom = new THREE.BufferGeometry();
+      combinedGeom.setAttribute("position", new THREE.BufferAttribute(mergedPos, 3));
+      if (normals.length === positions.length) {
+        const totalNLen = normals.reduce(function (s, a) { return s + a.length; }, 0);
+        const mergedNrm = new Float32Array(totalNLen);
+        let nOffset = 0;
+        for (const arr of normals) {
+          mergedNrm.set(arr, nOffset);
+          nOffset += arr.length;
+        }
+        combinedGeom.setAttribute("normal", new THREE.BufferAttribute(mergedNrm, 3));
+      }
+      merged.dispose();
+      other.dispose();
+      return combinedGeom;
+    }
+    return merged;
+  }
+
+  async function convertCadToStl(file, extension) {
+    const url = `${CONVERTER_API_BASE}/api/convert/cad-to-stl?filename=${encodeURIComponent(file.name)}`;
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/octet-stream" },
+      body: file
+    });
+
+    if (!response.ok) {
+      let details = "The converter service rejected the file.";
+      try {
+        const payload = await response.json();
+        if (payload && payload.error) {
+          details = payload.error;
+        }
+      } catch (_) {
+        const fallbackText = await response.text();
+        if (fallbackText) {
+          details = fallbackText;
+        }
+      }
+      throw new Error(details);
+    }
+
+    return response.arrayBuffer();
+  }
+
   async function loadModelFile(file) {
     if (!file) {
       return;
@@ -1863,11 +1956,12 @@ document.addEventListener("DOMContentLoaded", () => {
 
     const extension = getFileExtension(file.name);
     if (!SUPPORTED_INPUT_EXTENSIONS.has(extension)) {
-      setStatus("Please choose a valid .stl or .sldprt file.");
+      setStatus("Unsupported file format. Try STL, OBJ, PLY, GLTF, STEP, or SLDPRT.");
       return;
     }
 
     try {
+      // Server-side CAD conversions (STEP, IGES, BREP, SLDPRT → STL)
       if (extension === "sldprt") {
         setStatus(`Converting ${file.name} to STL via local converter...`);
         const convertedArrayBuffer = await convertSldprtToStl(file);
@@ -1876,9 +1970,76 @@ document.addEventListener("DOMContentLoaded", () => {
         return;
       }
 
+      if (CAD_EXTENSIONS.has(extension)) {
+        setStatus(`Converting ${file.name} to STL via FreeCAD...`);
+        const convertedArrayBuffer = await convertCadToStl(file, extension);
+        parseStlArrayBuffer(convertedArrayBuffer, `${stripFileExtension(file.name)}.stl`);
+        setStatus(`Converted and loaded ${file.name}.`);
+        return;
+      }
+
+      // Client-side format loaders
       setStatus(`Loading ${file.name}...`);
-      const stlArrayBuffer = await readFileAsArrayBuffer(file);
-      parseStlArrayBuffer(stlArrayBuffer, file.name);
+      const arrayBuffer = await readFileAsArrayBuffer(file);
+
+      if (extension === "stl") {
+        parseStlArrayBuffer(arrayBuffer, file.name);
+        return;
+      }
+
+      if (extension === "obj") {
+        const text = new TextDecoder().decode(arrayBuffer);
+        const group = objLoader.parse(text);
+        const geometry = extractGeometryFromObject3D(group);
+        if (!geometry) {
+          throw new Error("OBJ file contains no mesh geometry.");
+        }
+        loadGeometryIntoViewer(geometry, file.name);
+        return;
+      }
+
+      if (extension === "ply") {
+        const geometry = plyLoader.parse(arrayBuffer);
+        if (!geometry) {
+          throw new Error("PLY file could not be parsed.");
+        }
+        loadGeometryIntoViewer(geometry, file.name);
+        return;
+      }
+
+      if (extension === "gltf" || extension === "glb") {
+        await new Promise(function (resolve, reject) {
+          gltfLoader.parse(arrayBuffer, "", function (gltf) {
+            const geometry = extractGeometryFromObject3D(gltf.scene);
+            if (!geometry) {
+              reject(new Error("GLTF file contains no mesh geometry."));
+              return;
+            }
+            loadGeometryIntoViewer(geometry, file.name);
+            resolve();
+          }, function (error) {
+            reject(error);
+          });
+        });
+        return;
+      }
+
+      if (extension === "3mf") {
+        if (!THREE.ThreeMFLoader) {
+          throw new Error("3MF loader not available.");
+        }
+        const loader3mf = new THREE.ThreeMFLoader();
+        const group = loader3mf.parse(arrayBuffer);
+        const geometry = extractGeometryFromObject3D(group);
+        if (!geometry) {
+          throw new Error("3MF file contains no mesh geometry.");
+        }
+        loadGeometryIntoViewer(geometry, file.name);
+        return;
+      }
+
+      // Fallback: treat as STL
+      parseStlArrayBuffer(arrayBuffer, file.name);
     } catch (error) {
       console.error(error);
       if (extension === "sldprt") {
@@ -1886,9 +2047,33 @@ document.addEventListener("DOMContentLoaded", () => {
         setStatus(`SLDPRT conversion failed: ${friendlyError}`);
         return;
       }
-
-      setStatus("This STL could not be parsed. Try a different file.");
+      if (CAD_EXTENSIONS.has(extension)) {
+        setStatus(`CAD conversion failed: ${error.message}`);
+        return;
+      }
+      setStatus(`Could not load ${file.name}: ${error.message}`);
     }
+  }
+
+  function loadGeometryIntoViewer(geometry, fileName) {
+    const preparedBase = prepareBaseGeometry(geometry);
+
+    if (baseGeometry) {
+      baseGeometry.dispose();
+    }
+
+    baseGeometry = preparedBase;
+    currentFileName = fileName;
+    scaleX = scaleY = scaleZ = 1.0;
+    bboxOverlayActive = false;
+    slicePanelVisible = false;
+    sliceActive = false;
+
+    const bounds = getRefinementBounds();
+    const startingMultiplier = normalizeRequestedMultiplier(1, bounds);
+    updateRefinementUi(startingMultiplier, bounds);
+
+    rebuildModelFromSettings();
   }
 
   function sanitizeFileStem(stem) {

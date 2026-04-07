@@ -51,7 +51,21 @@
       "Bash(mkdir -p /tmp/mold_sprue_test)",
       "Bash(\"C:/Program Files/FreeCAD 1.0/bin/python.exe\" \"C:/Users/berry/WebstormProjects/PersonalWebsite/tools/generate-mold-with-freecad.py\" \"C:/Users/berry/WebstormProjects/PersonalWebsite/TestDocs/MeshRing1.stl\" \"/tmp/mold_sprue_test\" \"/tmp/mold_sprue_test/params.json\")",
       "Bash(mkdir -p /tmp/mold_nosprue)",
-      "Bash(\"C:/Program Files/FreeCAD 1.0/bin/python.exe\" \"C:/Users/berry/WebstormProjects/PersonalWebsite/tools/generate-mold-with-freecad.py\" \"C:/Users/berry/WebstormProjects/PersonalWebsite/TestDocs/MeshRing1.stl\" \"/tmp/mold_nosprue\" \"/tmp/mold_nosprue/params.json\")"
+      "Bash(\"C:/Program Files/FreeCAD 1.0/bin/python.exe\" \"C:/Users/berry/WebstormProjects/PersonalWebsite/tools/generate-mold-with-freecad.py\" \"C:/Users/berry/WebstormProjects/PersonalWebsite/TestDocs/MeshRing1.stl\" \"/tmp/mold_nosprue\" \"/tmp/mold_nosprue/params.json\")",
+      "Bash(C:/Program Files/FreeCAD 1.0/bin/freecadcmd.exe:*)",
+      "Bash(C:/Program Files/FreeCAD 1.0/bin/python.exe:*)",
+      "Bash(\"C:/Program Files/FreeCAD 1.0/bin/python.exe\" tools/convert-stl-to-step-parametric-with-freecad.py \"TestDocs/Station_3_Baseplate - Part 1.stl\" Testoutput/2026-04-06_baseplate_phaseB.step)",
+      "Bash(\"C:/Program Files/FreeCAD 1.0/bin/python.exe\" tools/convert-stl-to-step-parametric-with-freecad.py TestDocs/MeshRing1.stl Testoutput/2026-04-06_ring_phaseB.step)",
+      "Bash(npm start:*)",
+      "Bash(npm run:*)",
+      "Bash(\"C:/Program Files/FreeCAD 1.0/bin/python.exe\" -m pip install shapely)",
+      "Bash(\"C:/Program Files/FreeCAD 1.0/bin/python.exe\" -m pip install networkx)",
+      "Bash('C:/Program Files/FreeCAD 1.0/bin/python.exe' -c ':*)",
+      "Bash(\"C:/Program Files/FreeCAD 1.0/bin/python.exe\" \"C:/Users/berry/WebstormProjects/PersonalWebsite/tools/diagnose-cross-section.py\" \"C:/Users/berry/WebstormProjects/PersonalWebsite/Testoutput/baseplate_phaseB2_tessellated.stl\")",
+      "Bash(\"C:/Program Files/FreeCAD 1.0/bin/python.exe\" \"C:/Users/berry/WebstormProjects/PersonalWebsite/tools/diagnose-cross-section.py\" \"C:/Users/berry/WebstormProjects/PersonalWebsite/Testoutput/baseplate_phaseB5_tess.stl\")",
+      "Bash(C:/Program Files/FreeCAD 1.0/bin/FreeCADCmd.exe:*)",
+      "Bash(xargs grep:*)",
+      "Bash(grep -l \"MeshRing1\\\\|torus fillet applied\" /c/Users/berry/WebstormProjects/PersonalWebsite/tmp-converter*.log)"
     ]
   }
 }

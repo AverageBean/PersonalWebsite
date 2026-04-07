@@ -105,14 +105,14 @@
     </div>
 
     <div class="drop-zone" id="dropZone" role="button" tabindex="0">
-      <p class="drop-zone-title">Drag and drop an STL or SLDPRT file</p>
-      <p class="drop-zone-subtitle">or click to browse your computer</p>
-      <input accept=".stl,.sldprt" id="fileInput" type="file">
+      <p class="drop-zone-title">Drag and drop a 3D model file</p>
+      <p class="drop-zone-subtitle">STL, OBJ, PLY, GLTF, GLB, 3MF, STEP, IGES, SLDPRT</p>
+      <input accept=".stl,.obj,.ply,.gltf,.glb,.3mf,.step,.stp,.iges,.igs,.brep,.brp,.sldprt" id="fileInput" type="file">
     </div>
 
     <div class="viewer-canvas-wrapper">
       <div class="viewer-canvas-frame">
-        <div id="viewerCanvas" aria-label="3D STL preview window"></div>
+        <div id="viewerCanvas" aria-label="3D model preview window"></div>
       </div>
       <div class="canvas-overlay-group">
         <button id="gridToggleBtn" class="canvas-overlay-btn is-active" title="Toggle grid" type="button" aria-pressed="true">
@@ -371,6 +371,11 @@
 <script src="https://unpkg.com/three@0.128.0/build/three.min.js"></script>
 <script src="https://unpkg.com/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
 <script src="https://unpkg.com/three@0.128.0/examples/js/loaders/STLLoader.js"></script>
+<script src="https://unpkg.com/three@0.128.0/examples/js/loaders/OBJLoader.js"></script>
+<script src="https://unpkg.com/three@0.128.0/examples/js/loaders/PLYLoader.js"></script>
+<script src="https://unpkg.com/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
+<script src="https://unpkg.com/fflate@0.7.3/umd/index.js"></script>
+<script src="https://unpkg.com/three@0.128.0/examples/js/loaders/3MFLoader.js"></script>
 <script src="https://unpkg.com/three@0.128.0/examples/js/exporters/STLExporter.js"></script>
 <script src="https://unpkg.com/three@0.128.0/examples/js/exporters/OBJExporter.js"></script>
 <script src="https://unpkg.com/three@0.128.0/examples/js/exporters/GLTFExporter.js"></script>

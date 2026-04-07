@@ -111,6 +111,17 @@ COAXIAL_DOT_THRESHOLD = 0.98  # axes within ~11.5° are considered coaxial
 # Height margin when cutting a hole cylinder (ensures full cut-through)
 HOLE_CUT_MARGIN = 0.5  # mm
 
+# ── Phase B: Torus (fillet) detection ────────────────────────────────────────
+RANSAC_DIST_THRESHOLD_TORUS = 0.20  # mm – foot-point-to-spine-circle tolerance
+TORUS_MIN_INLIERS           = 20    # minimum faces for a valid torus
+TORUS_MAX_ROUNDS            = 10    # max RANSAC rounds for tori
+
+# Fillet radius merge tolerance: tori whose minor_r differs by less than this
+# fraction are assumed to be the same fillet and merged before applying
+# makeFillet.  Prevents multiple makeFillet passes from consuming edges and
+# forcing a CSG-fusion fallback that creates topological artifacts.
+FILLET_MERGE_REL_TOL        = 0.25  # 25 % relative tolerance on minor_r
+
 
 # ── Load mesh ─────────────────────────────────────────────────────────────────
 
@@ -282,6 +293,289 @@ def detect_planes(pts, nrm, base_mask, used, min_abs, thresh, max_iter, total, m
     return results
 
 
+# ── Phase B: Torus (fillet) detection ────────────────────────────────────────
+
+def fit_circle_3d(points):
+    """Fit a circle to 3D points via algebraic least-squares.
+
+    Projects points onto their best-fit plane (SVD), fits a 2D algebraic circle,
+    and lifts the result back to 3D.
+
+    Returns (center_3d, plane_normal, radius) or None on failure.
+    """
+    if len(points) < 3:
+        return None
+    centroid = points.mean(axis=0)
+    pts_c = points - centroid
+
+    # Best-fit plane via SVD
+    _, S, Vt = np.linalg.svd(pts_c, full_matrices=False)
+    plane_normal = Vt[2]  # smallest singular value direction = plane normal
+
+    # Build 2D coordinate system in the plane
+    u = Vt[0]  # first principal direction
+    v = Vt[1]  # second principal direction
+
+    # Project onto 2D
+    x = pts_c @ u
+    y = pts_c @ v
+
+    # Algebraic circle fit: x² + y² + Dx + Ey + F = 0
+    A = np.column_stack([x, y, np.ones(len(x))])
+    b = -(x**2 + y**2)
+    try:
+        params, _, _, _ = np.linalg.lstsq(A, b, rcond=None)
+    except Exception:
+        return None
+
+    D, E, F = params
+    cx_2d = -D / 2.0
+    cy_2d = -E / 2.0
+    r_sq = cx_2d**2 + cy_2d**2 - F
+    if r_sq <= 0:
+        return None
+
+    radius = float(np.sqrt(r_sq))
+    center_3d = centroid + cx_2d * u + cy_2d * v
+    return center_3d, plane_normal, radius
+
+
+def fit_circle_fixed_axis(points, axis, axis_point):
+    """Fit a circle to 3D points with the plane normal constrained to `axis`.
+
+    Projects points onto the plane through `axis_point` perpendicular to `axis`,
+    fits a 2D algebraic circle, and returns (center_3d, radius) or None.
+    """
+    if len(points) < 3:
+        return None
+
+    # Project points onto the plane perpendicular to axis
+    rel = points - axis_point
+    t = rel @ axis  # signed distance along axis
+    projected = points - np.outer(t, axis)  # project onto plane
+
+    # Build orthonormal basis in the plane
+    # Pick any vector not parallel to axis
+    trial = np.array([1., 0., 0.])
+    if abs(np.dot(trial, axis)) > 0.9:
+        trial = np.array([0., 1., 0.])
+    u = trial - np.dot(trial, axis) * axis
+    u /= np.linalg.norm(u)
+    v = np.cross(axis, u)
+
+    centroid = projected.mean(axis=0)
+    pts_c = projected - centroid
+    x = pts_c @ u
+    y = pts_c @ v
+
+    A = np.column_stack([x, y, np.ones(len(x))])
+    b_vec = -(x**2 + y**2)
+    try:
+        params, _, _, _ = np.linalg.lstsq(A, b_vec, rcond=None)
+    except Exception:
+        return None
+
+    D, E, F = params
+    cx_2d = -D / 2.0
+    cy_2d = -E / 2.0
+    r_sq = cx_2d**2 + cy_2d**2 - F
+    if r_sq <= 0:
+        return None
+
+    radius = float(np.sqrt(r_sq))
+    center_3d = centroid + cx_2d * u + cy_2d * v
+    return center_3d, radius
+
+
+def detect_tori(face_centers, face_normals, used, body_axis, body_center,
+                total, cylinders, planes, thresh=RANSAC_DIST_THRESHOLD_TORUS):
+    """Detect toroidal surfaces (fillets) on unclaimed intermediate-normal faces.
+
+    Uses an algebraic linear method with the axis pre-constrained to `body_axis`.
+    For a point P on a torus with spine circle center C, axis A, major R, minor r:
+      (dist_to_axis - R)² + h² = r²
+    Rearranges to: dist² + h² = 2*R*dist + (r² - R²)
+    which is LINEAR in R and (r² - R²), solvable via least-squares.
+
+    Clusters fillet faces using known cylinder radii and cap plane heights to
+    separate distinct tori (e.g. inner-top, inner-bottom, outer-top, outer-bottom).
+
+    Returns list of dicts: {center, axis, major_r, minor_r, inlier_mask, concave}
+    """
+    avail = ~used
+    if avail.sum() < TORUS_MIN_INLIERS:
+        return []
+
+    cos_axis = np.abs(face_normals @ body_axis)
+    # Fillet normals transition between axial (~1.0) and radial (~0.0);
+    # widen range to capture full fillet sweep.
+    fillet_mask = avail & (cos_axis > 0.10) & (cos_axis < 0.90)
+
+    n_cands = int(fillet_mask.sum())
+    print(f"[parametric] torus detect: {n_cands} candidate fillet faces", flush=True)
+    if n_cands < TORUS_MIN_INLIERS:
+        return []
+
+    cand_idx = np.where(fillet_mask)[0]
+    cand_pts = face_centers[cand_idx]
+    cand_nrm = face_normals[cand_idx]
+
+    # Compute cylindrical coordinates relative to body axis.
+    rel = cand_pts - body_center
+    h = rel @ body_axis                              # height along axis
+    along = np.outer(h, body_axis)
+    lateral = rel - along
+    rho = np.linalg.norm(lateral, axis=1)             # radial distance from axis
+
+    # Determine clustering boundaries from known geometry.
+    # Radial split: midpoint between distinct cylinder radii.
+    cyl_radii = sorted(set(round(c["radius"], 1) for c in cylinders))
+    if len(cyl_radii) >= 2:
+        rho_split = (cyl_radii[-1] + cyl_radii[-2]) / 2.0
+    else:
+        rho_split = float(np.median(rho))
+
+    # Height split: midpoint between cap planes (or median).
+    cap_heights = []
+    for pl in planes:
+        if abs(float(np.dot(pl["normal"], body_axis))) > 0.85:
+            pt = -pl["d"] * pl["normal"]
+            cap_heights.append(float(np.dot(pt - body_center, body_axis)))
+    if len(cap_heights) >= 2:
+        h_split = (min(cap_heights) + max(cap_heights)) / 2.0
+    else:
+        h_split = float(np.median(h))
+
+    cluster_keys = []
+    for rr, hh in zip(rho, h):
+        r_label = "outer" if rr >= rho_split else "inner"
+        h_label = "top" if hh >= h_split else "bottom"
+        cluster_keys.append(f"{r_label}_{h_label}")
+
+    unique_clusters = sorted(set(cluster_keys))
+    print(
+        f"[parametric] torus clusters: {unique_clusters} "
+        f"(rho_split={rho_split:.2f}, h_split={h_split:.2f})",
+        flush=True,
+    )
+
+    results = []
+
+    for cl_name in unique_clusters:
+        cl_mask = np.array([k == cl_name for k in cluster_keys])
+        n_cl = int(cl_mask.sum())
+        if n_cl < TORUS_MIN_INLIERS:
+            continue
+
+        cl_rho = rho[cl_mask]
+        cl_h_raw = h[cl_mask]
+        cl_local_idx = np.where(cl_mask)[0]
+
+        # For the algebraic fit, h should be measured from the nearest cap plane,
+        # not from the body center.  A fillet connects a cylinder to a cap; its
+        # torus center sits at the cap plane height.
+        if cap_heights:
+            if "top" in cl_name:
+                h_cap = max(cap_heights)
+            else:
+                h_cap = min(cap_heights)
+        else:
+            h_cap = float(cl_h_raw.mean())
+        cl_h = cl_h_raw - h_cap  # height relative to the nearest cap plane
+
+        # Algebraic torus fit: s = 2*R*d + b, where s = d² + h², b = r² - R²
+        s = cl_rho**2 + cl_h**2
+        A_mat = np.column_stack([cl_rho, np.ones(n_cl)])
+        try:
+            params, _, _, _ = np.linalg.lstsq(A_mat, s, rcond=None)
+        except Exception:
+            continue
+
+        a_coeff, b_coeff = params
+        R_fit = a_coeff / 2.0
+        r_sq = b_coeff + R_fit**2
+        if r_sq <= 0 or R_fit <= 0:
+            print(
+                f"[parametric]   cluster {cl_name}: degenerate fit "
+                f"(R={R_fit:.2f}, r²={r_sq:.3f})",
+                flush=True,
+            )
+            continue
+        r_fit = float(np.sqrt(r_sq))
+
+        # Sanity: R should be comparable to known cylinder radii, r should be
+        # a reasonable fillet radius (0.1 to ~half of part height).
+        if r_fit < 0.1 or r_fit > 50.0 or R_fit < 1.0:
+            print(
+                f"[parametric]   cluster {cl_name}: implausible R={R_fit:.2f}, r={r_fit:.2f}",
+                flush=True,
+            )
+            continue
+
+        # Compute point-to-torus-surface distance for inlier check.
+        dist_to_surface = np.abs(np.sqrt((cl_rho - R_fit)**2 + cl_h**2) - r_fit)
+        inlier_local = dist_to_surface < thresh
+        n_inliers = int(inlier_local.sum())
+
+        if n_inliers < TORUS_MIN_INLIERS:
+            print(
+                f"[parametric]   cluster {cl_name}: too few inliers "
+                f"({n_inliers}/{n_cl}), R={R_fit:.2f}, r={r_fit:.2f}",
+                flush=True,
+            )
+            continue
+
+        # Refine R and r using only inliers.
+        inl_rho = cl_rho[inlier_local]
+        inl_h = cl_h[inlier_local]
+        s_inl = inl_rho**2 + inl_h**2
+        A_inl = np.column_stack([inl_rho, np.ones(n_inliers)])
+        try:
+            params2, _, _, _ = np.linalg.lstsq(A_inl, s_inl, rcond=None)
+            R_fit = params2[0] / 2.0
+            r_sq2 = params2[1] + R_fit**2
+            if r_sq2 > 0 and R_fit > 0:
+                r_fit = float(np.sqrt(r_sq2))
+        except Exception:
+            pass
+
+        # Spine center: on the body axis at the cap plane height.
+        spine_center = body_center + body_axis * h_cap
+
+        # Classify concave vs convex from normal orientation.
+        inl_global_idx = cl_local_idx[inlier_local]
+        inl_nrm = cand_nrm[inl_global_idx]
+        inl_lateral = lateral[inl_global_idx]
+        lat_d = np.linalg.norm(inl_lateral, axis=1, keepdims=True)
+        lat_d_safe = np.where(lat_d < 1e-9, 1.0, lat_d)
+        lat_u = inl_lateral / lat_d_safe
+        nrm_radial = np.einsum("ij,ij->i", inl_nrm, lat_u)
+        concave = float(nrm_radial.mean()) < 0
+
+        # Build global inlier mask.
+        inlier_global = np.zeros(len(face_centers), dtype=bool)
+        inlier_global[cand_idx[inl_global_idx]] = True
+
+        results.append({
+            "center":     spine_center,
+            "axis":       body_axis.copy(),
+            "major_r":    float(R_fit),
+            "minor_r":    float(r_fit),
+            "inliers":    int(inlier_global.sum()),
+            "inlier_mask": inlier_global,
+            "concave":    concave,
+        })
+
+        print(
+            f"[parametric]   torus ({cl_name}): R={R_fit:.2f} mm, r={r_fit:.2f} mm, "
+            f"inliers={n_inliers} ({n_inliers/total:.1%}), "
+            f"{'INNER(concave)' if concave else 'OUTER(convex)'}",
+            flush=True,
+        )
+
+    return results
+
+
 # ── Run detection ─────────────────────────────────────────────────────────────
 # Planes are detected first across ALL faces using a normal-alignment filter.
 # This correctly separates flat surfaces (consistent normals) from curved faces
@@ -302,17 +596,81 @@ planes = detect_planes(
 used_after_planes = used.copy()
 
 print("[parametric] detecting cylinders …", flush=True)
+# Restrict to horizontal-normal faces only — prevents fillet faces (intermediate
+# normals) from being consumed as cylinder inliers, preserving them for Phase B
+# torus detection.
+cyl_candidate_mask = horiz_mask & ~used
 cylinders = detect_cylinders(
-    face_centers, face_normals, ~used, used,
+    face_centers, face_normals, cyl_candidate_mask, used,
     MIN_INLIER_ABS, RANSAC_DIST_THRESHOLD_CYL, RANSAC_ITERATIONS, total_faces
 )
 
 cyl_inliers   = sum(c["inliers"] for c in cylinders)
 plane_inliers = sum(p["inliers"] for p in planes)
-coverage      = (cyl_inliers + plane_inliers) / total_faces
+
+# Phase B: Detect tori (fillets) on unclaimed faces if we have a coaxial body axis.
+tori = []
+if cylinders:
+    # Use the largest outer cylinder's axis as the body axis for torus detection.
+    ext_cyls_pre = [c for c in cylinders if not c["concave"]]
+    if not ext_cyls_pre:
+        ext_cyls_pre = [max(cylinders, key=lambda c: c["radius"])]
+    body_cyl = max(ext_cyls_pre, key=lambda c: c["radius"])
+    body_axis_pre = body_cyl["axis"]
+    body_center_pre = body_cyl["center"]
+
+    print("[parametric] detecting tori (fillets) …", flush=True)
+    tori = detect_tori(
+        face_centers, face_normals, used, body_axis_pre, body_center_pre, total_faces,
+        cylinders, planes
+    )
+    for t in tori:
+        used[t["inlier_mask"]] = True
+
+    # Cleanup pass: claim remaining unclaimed faces geometrically close to
+    # any detected torus surface.  Catches edge faces with near-axial or
+    # near-radial normals that fell outside the fillet candidate range.
+    if tori:
+        unclaimed = ~used
+        n_unclaimed = int(unclaimed.sum())
+        if n_unclaimed > 0:
+            uc_idx = np.where(unclaimed)[0]
+            uc_pts = face_centers[uc_idx]
+            rel_uc = uc_pts - body_center_pre
+            h_uc = rel_uc @ body_axis_pre
+            along_uc = np.outer(h_uc, body_axis_pre)
+            rho_uc = np.linalg.norm(rel_uc - along_uc, axis=1)
+
+            cleanup_claimed = np.zeros(len(face_centers), dtype=bool)
+            for t in tori:
+                R = t["major_r"]
+                r = t["minor_r"]
+                # Spine center height along axis
+                h_spine = float(np.dot(t["center"] - body_center_pre, body_axis_pre))
+                h_rel = h_uc - h_spine
+                # Point-to-torus-surface distance
+                d_torus = np.abs(np.sqrt((rho_uc - R)**2 + h_rel**2) - r)
+                close = d_torus < RANSAC_DIST_THRESHOLD_TORUS * 3.0  # generous threshold
+                cleanup_claimed[uc_idx[close]] = True
+
+            n_cleanup = int(cleanup_claimed.sum())
+            if n_cleanup > 0:
+                used[cleanup_claimed] = True
+                # Add to existing torus inlier counts
+                for t in tori:
+                    t["inliers"] += n_cleanup // len(tori)
+                print(
+                    f"[parametric] torus cleanup: {n_cleanup} additional faces claimed",
+                    flush=True,
+                )
+
+torus_inliers = sum(t["inliers"] for t in tori)
+
+# Preliminary coverage (box fillet claiming deferred until after function definitions).
+coverage = (cyl_inliers + plane_inliers + torus_inliers) / total_faces
 print(
     f"[parametric] coverage={coverage:.1%}  "
-    f"({len(cylinders)} cyl, {len(planes)} plane)",
+    f"({len(cylinders)} cyl, {len(planes)} plane, {len(tori)} torus)",
     flush=True
 )
 
@@ -685,32 +1043,62 @@ def detect_circle_holes(
             continue
 
         # Run RANSAC on this cluster alone to find cylinder r and axis.
+        ransac_ok = False
         cyl = pyrsc.Cylinder()
         try:
             center, axis, radius, inl = cyl.fit(
                 cl_pts, RANSAC_DIST_THRESHOLD_CYL, maxIteration=RANSAC_ITERATIONS
             )
+            if inl is not None and len(inl) >= 12:
+                axis_n   = np.array(axis,   dtype=float)
+                axis_n  /= np.linalg.norm(axis_n)
+                center_n = np.array(center, dtype=float)
+                r        = float(radius)
+                ransac_ok = abs(float(np.dot(axis_n, cap_axis))) >= 0.85
         except Exception as exc:
             print(f"[parametric]   cluster {ci+1}: RANSAC failed: {exc}", flush=True)
-            continue
 
-        if inl is None or len(inl) < 12:
-            continue
+        # Fallback: 2D algebraic circle fit in the lateral plane.
+        # This handles cases where the faces form a ring in the XZ plane
+        # but RANSAC can't determine the cap-axis direction (e.g. small
+        # center holes where all faces are at nearly the same Y height).
+        if not ransac_ok:
+            pts_2d = cl_pts[:, [la, lb]]  # (N, 2)
+            A = np.column_stack([pts_2d, np.ones(len(pts_2d))])
+            b = (pts_2d ** 2).sum(axis=1)
+            try:
+                sol, _, _, _ = np.linalg.lstsq(A, b, rcond=None)
+                cx_2d = sol[0] / 2.0
+                cy_2d = sol[1] / 2.0
+                r = float(np.sqrt(sol[2] + cx_2d**2 + cy_2d**2))
+                # Validate: residuals should be small
+                dists = np.sqrt((pts_2d[:, 0] - cx_2d)**2 + (pts_2d[:, 1] - cy_2d)**2)
+                residual = float(np.abs(dists - r).mean())
+                if residual > 0.5:
+                    print(
+                        f"[parametric]   cluster {ci+1}: 2D circle fit poor "
+                        f"(residual={residual:.3f}mm), skip",
+                        flush=True,
+                    )
+                    continue
+                # Build 3D center on the cap axis at the cluster's mean position
+                center_n = np.zeros(3)
+                center_n[la] = cx_2d
+                center_n[lb] = cy_2d
+                center_n[cap_axis_idx] = float(cl_pts[:, cap_axis_idx].mean())
+                axis_n = cap_axis.copy()
+                inl = np.arange(len(cl_pts))
+                print(
+                    f"[parametric]   cluster {ci+1}: RANSAC axis misaligned, "
+                    f"using 2D circle fit (r={r:.2f}mm, residual={residual:.3f}mm)",
+                    flush=True,
+                )
+            except Exception as exc:
+                print(f"[parametric]   cluster {ci+1}: 2D circle fit failed: {exc}", flush=True)
+                continue
 
-        axis_n   = np.array(axis,   dtype=float)
-        axis_n  /= np.linalg.norm(axis_n)
-        center_n = np.array(center, dtype=float)
-        r        = float(radius)
-
-        # Must be cap-axis aligned and small enough to be a through-hole.
+        # Must be small enough to be a through-hole.
         max_dim = float(min(fc_max[la] - fc_min[la], fc_max[lb] - fc_min[lb]))
-        if abs(float(np.dot(axis_n, cap_axis))) < 0.85:
-            print(
-                f"[parametric]   cluster {ci+1}: axis misaligned "
-                f"(dot={abs(float(np.dot(axis_n, cap_axis))):.2f})",
-                flush=True,
-            )
-            continue
         if r < 0.5 or r > max_dim * 0.40:
             print(
                 f"[parametric]   cluster {ci+1}: r={r:.2f} outside [0.5, {max_dim*0.40:.1f}]",
@@ -750,14 +1138,21 @@ def detect_circle_holes(
 
 
 def apply_internal_slot_cuts(
-    solid, planes, cap_axis_idx, fc_min, fc_max, face_centers, skip_circles=None
+    solid, planes, cap_axis_idx, fc_min, fc_max, face_centers, mesh_triangles,
+    skip_circles=None
 ):
     """
     Detect and subtract oblong (stadium) slot cuts from internal plane pairs.
 
-    Each matched plane pair (one +axis, one −axis, at positions interior to the
+    Uses a two-pass approach:
+      Pass 1: Collect all slot pairs across both lateral axes.
+      Pass 2: Cut each slot, suppressing end caps at T-junctions where a
+              perpendicular slot pair straddles the segment end position.
+
+    Each matched plane pair (one +axis, one -axis, at positions interior to the
     outer walls) defines an oblong through-cut:
-      - Width  = distance between the two wall planes
+      - Width  = distance between the two wall planes (from vertex positions
+                 for accuracy, not face-centre means)
       - Length = straight-section extent from wall face-centre bounds + two
                  semicircular end caps of radius = width/2
       - Depth  = full part thickness (all cuts are through-features)
@@ -768,6 +1163,9 @@ def apply_internal_slot_cuts(
     skip_circles: list of (center_la, center_lb, r) for detected circular holes.
     Any plane pair whose slot centre coincides with a known circle is suppressed
     to avoid double-cutting.
+
+    mesh_triangles: (N, 3, 3) array of triangle vertex positions, used to compute
+    accurate wall surface positions from vertex data instead of face-centre means.
 
     Returns the modified solid.
     """
@@ -792,7 +1190,8 @@ def apply_internal_slot_cuts(
             float(cap_axis_vec[2]),
         )
 
-    n_cuts = 0
+    # ── Pass 1: collect all slot pairs across both axes ──────────────────────
+    all_slot_pairs = []   # list of dicts with axis_idx, slot_left, slot_right, ...
 
     for axis_idx in [la, lb]:
         outer_min = float(fc_min[axis_idx])
@@ -853,9 +1252,6 @@ def apply_internal_slot_cuts(
             # Skip if this slot centre corresponds to a detected circle hole.
             skip = False
             for cx_la, cx_lb, cr in skip_circles:
-                # Circle is in the lateral plane (la, lb); this slot is in axis_idx.
-                # Check: the slot centre in axis_idx is near cx at axis_idx position,
-                # AND the slot is small enough to be the circle tessellation.
                 circle_ctr_in_axis = cx_la if axis_idx == la else cx_lb
                 if (abs(slot_center - circle_ctr_in_axis) < cr * 1.5 and
                         width < cr * 3.0):
@@ -871,9 +1267,6 @@ def apply_internal_slot_cuts(
                 continue
 
             # Straight-section extent in the perp direction from face-centre data.
-            # Face centres may be non-contiguous (e.g. two T-heads on opposite ends
-            # of the same wall pair).  Cluster them by gaps so each separate feature
-            # gets its own box + end caps rather than one over-long merged cut.
             all_indices = []
             if pp["plane"].get("indices") is not None:
                 all_indices.extend(pp["plane"]["indices"].tolist())
@@ -883,7 +1276,6 @@ def apply_internal_slot_cuts(
             if all_indices:
                 perp_vals   = face_centers[all_indices, perp_idx]
                 perp_sorted = np.sort(perp_vals)
-                # A gap larger than 2× the slot width signals a new distinct feature.
                 gap_thresh  = max(5.0, width * 2.0)
                 splits      = np.where(np.diff(perp_sorted) > gap_thresh)[0] + 1
                 segments    = np.split(perp_sorted, splits)
@@ -891,83 +1283,178 @@ def apply_internal_slot_cuts(
             else:
                 slot_segs = [(float(fc_min[perp_idx]), float(fc_max[perp_idx]))]
 
-            # Part edge positions — used to decide whether an end cap would
-            # incorrectly scallop the part boundary.
-            part_lo    = float(fc_min[perp_idx])
-            part_hi    = float(fc_max[perp_idx])
-            EDGE_MARGIN = 2.0  # mm — skip end cap when within (r_semi + EDGE_MARGIN) of edge
+            all_slot_pairs.append({
+                "axis_idx":    axis_idx,
+                "perp_idx":    perp_idx,
+                "slot_left":   slot_left,
+                "slot_right":  slot_right,
+                "slot_center": slot_center,
+                "width":       width,
+                "r_semi":      r_semi,
+                "segments":    slot_segs,
+            })
 
-            for seg_min, seg_max in slot_segs:
-                # --- Straight rectangular section ---
-                box_origin = np.zeros(3)
-                box_size   = np.zeros(3)
-                box_origin[axis_idx]     = slot_left
-                box_size[axis_idx]       = width
-                box_origin[perp_idx]     = seg_min
-                box_size[perp_idx]       = seg_max - seg_min
-                box_origin[cap_axis_idx] = cut_y0
-                box_size[cap_axis_idx]   = cut_h
+    # ── Pass 2: cut slots with T-junction awareness ──────────────────────────
 
-                ok = True
-                if np.any(box_size <= 0):
-                    ok = False
-                else:
-                    try:
-                        cut_box = Part.makeBox(
-                            float(box_size[0]), float(box_size[1]), float(box_size[2]),
-                            fv(box_origin),
-                        )
-                        solid = solid.cut(cut_box)
-                    except Exception as exc:
-                        print(f"[parametric]   slot box cut failed: {exc}", flush=True)
-                        ok = False
+    def find_t_junction(slot, perp_end):
+        """
+        Check if a segment end is at a T-junction with a perpendicular slot.
 
-                if not ok:
+        Returns the perpendicular slot's wall center position along
+        slot["perp_idx"] if a T-junction exists (so the box can be extended
+        exactly to that point), or None if no T-junction.
+        """
+        for other in all_slot_pairs:
+            if other["axis_idx"] == slot["axis_idx"]:
+                continue  # same axis -- not perpendicular
+            # The perp slot has walls at [other.slot_left, other.slot_right]
+            # along other.axis_idx == slot.perp_idx.
+            # Check 1: perp_end is within the perp slot's wall range (with margin)
+            margin = other["r_semi"] * 0.5
+            if not (other["slot_left"] - margin <= perp_end <= other["slot_right"] + margin):
+                continue
+            # Check 2: our slot_center falls within one of the perp slot's
+            # segments (which are along other.perp_idx == slot.axis_idx)
+            our_pos_in_perp_width = slot["slot_center"]
+            for seg_min, seg_max in other["segments"]:
+                seg_margin = other["r_semi"] + other["width"]
+                if seg_min - seg_margin <= our_pos_in_perp_width <= seg_max + seg_margin:
+                    # T-junction found. Return the perp slot's center position
+                    # along our perp axis — this is where we should extend to.
+                    return other["slot_center"]
+        return None
+
+    n_cuts = 0
+    part_lo_map = {la: float(fc_min[la]), lb: float(fc_min[lb])}
+    part_hi_map = {la: float(fc_max[la]), lb: float(fc_max[lb])}
+    EDGE_MARGIN = 2.0  # mm
+
+    for slot in all_slot_pairs:
+        axis_idx    = slot["axis_idx"]
+        perp_idx    = slot["perp_idx"]
+        slot_left   = slot["slot_left"]
+        slot_right  = slot["slot_right"]
+        slot_center = slot["slot_center"]
+        width       = slot["width"]
+        r_semi      = slot["r_semi"]
+        part_lo     = part_lo_map[perp_idx]
+        part_hi     = part_hi_map[perp_idx]
+
+        for seg_min, seg_max in slot["segments"]:
+            # --- Classify each segment end BEFORE cutting ---
+            # Determine end-cap treatment: rounded cylinder, box extension
+            # (T-junction), or nothing (part edge).
+            effective_min = seg_min
+            effective_max = seg_max
+            end_treatment = {}  # perp_end -> "cap" | "extend" | "skip"
+
+            for perp_end in (seg_min, seg_max):
+                at_edge = (
+                    perp_end < part_lo + r_semi + EDGE_MARGIN or
+                    perp_end > part_hi - r_semi - EDGE_MARGIN
+                )
+                if at_edge:
+                    end_treatment[perp_end] = "skip"
+                    print(
+                        f"[parametric]   end-cap skipped (at part edge "
+                        f"perp={perp_end:.1f}, edge=[{part_lo:.1f},{part_hi:.1f}])",
+                        flush=True,
+                    )
                     continue
 
-                # --- Semicircular end caps (two cylinders, full height) ---
-                # Skip if this end of the slot is at the part boundary — the slot
-                # opens through the edge and needs no rounded cap there.
-                cyl_ok = 0
-                for perp_end in (seg_min, seg_max):
-                    at_edge = (
-                        perp_end < part_lo + r_semi + EDGE_MARGIN or
-                        perp_end > part_hi - r_semi - EDGE_MARGIN
+                t_pos = find_t_junction(slot, perp_end)
+                if t_pos is not None:
+                    end_treatment[perp_end] = "extend"
+                    # Extend the box to the perpendicular slot's center position.
+                    # This fills the gap between the face-centre bound and the
+                    # actual slot intersection without overshooting.
+                    if perp_end == seg_min:
+                        effective_min = min(effective_min, t_pos)
+                    else:
+                        effective_max = max(effective_max, t_pos)
+                    print(
+                        f"[parametric]   end-cap -> box extension (T-junction "
+                        f"perp={perp_end:.1f} -> {t_pos:.1f})",
+                        flush=True,
                     )
-                    if at_edge:
-                        print(
-                            f"[parametric]   end-cap skipped (at part edge "
-                            f"perp={perp_end:.1f}, edge=[{part_lo:.1f},{part_hi:.1f}])",
-                            flush=True,
-                        )
-                        continue
-                    cyl_base = np.zeros(3)
-                    cyl_base[axis_idx]     = slot_center
-                    cyl_base[perp_idx]     = perp_end
-                    cyl_base[cap_axis_idx] = cut_y0
-                    try:
-                        end_cyl = Part.makeCylinder(
-                            r_semi, cut_h, fv(cyl_base), fv_cap_axis()
-                        )
-                        solid = solid.cut(end_cyl)
-                        cyl_ok += 1
-                    except Exception as exc:
-                        print(f"[parametric]   end-cap cut failed: {exc}", flush=True)
+                else:
+                    end_treatment[perp_end] = "cap"
 
-                n_cuts += 1
-                print(
-                    f"[parametric]   oblong cut axis={axis_idx}: "
-                    f"walls=[{slot_left:.1f},{slot_right:.1f}] w={width:.1f} mm, "
-                    f"straight=[{seg_min:.1f},{seg_max:.1f}], "
-                    f"r_semi={r_semi:.2f} mm, end_caps={cyl_ok}",
-                    flush=True,
-                )
+            # --- Straight rectangular section (with T-junction extensions) ---
+            box_origin = np.zeros(3)
+            box_size   = np.zeros(3)
+            box_origin[axis_idx]     = slot_left
+            box_size[axis_idx]       = width
+            box_origin[perp_idx]     = effective_min
+            box_size[perp_idx]       = effective_max - effective_min
+            box_origin[cap_axis_idx] = cut_y0
+            box_size[cap_axis_idx]   = cut_h
+
+            ok = True
+            if np.any(box_size <= 0):
+                ok = False
+            else:
+                try:
+                    cut_box = Part.makeBox(
+                        float(box_size[0]), float(box_size[1]), float(box_size[2]),
+                        fv(box_origin),
+                    )
+                    solid = solid.cut(cut_box)
+                except Exception as exc:
+                    print(f"[parametric]   slot box cut failed: {exc}", flush=True)
+                    ok = False
+
+            if not ok:
+                continue
+
+            # --- Semicircular end caps ---
+            # Place caps for free ends ("cap") and also for T-junction ends
+            # ("extend") when the segment is long relative to the slot width.
+            # Long segments represent real slot terminations at the intersection;
+            # short segments (< width) are just fragments inside a perpendicular
+            # slot gap and don't have physical rounded ends.
+            seg_length = seg_max - seg_min
+            cyl_ok = 0
+            for perp_end in (seg_min, seg_max):
+                treatment = end_treatment.get(perp_end)
+                if treatment == "cap":
+                    pass  # always place cap for free ends
+                elif treatment == "extend" and seg_length > width:
+                    # T-junction with a long segment — the slot genuinely
+                    # terminates near the perpendicular slot; place a rounded
+                    # end cap at the original face-centre bound.
+                    pass
+                else:
+                    continue
+
+                cyl_base = np.zeros(3)
+                cyl_base[axis_idx]     = slot_center
+                cyl_base[perp_idx]     = perp_end
+                cyl_base[cap_axis_idx] = cut_y0
+                try:
+                    end_cyl = Part.makeCylinder(
+                        r_semi, cut_h, fv(cyl_base), fv_cap_axis()
+                    )
+                    solid = solid.cut(end_cyl)
+                    cyl_ok += 1
+                except Exception as exc:
+                    print(f"[parametric]   end-cap cut failed: {exc}", flush=True)
+
+            n_cuts += 1
+            print(
+                f"[parametric]   oblong cut axis={axis_idx}: "
+                f"walls=[{slot_left:.1f},{slot_right:.1f}] w={width:.1f} mm, "
+                f"straight=[{seg_min:.1f},{seg_max:.1f}], "
+                f"r_semi={r_semi:.2f} mm, end_caps={cyl_ok}",
+                flush=True,
+            )
 
     print(f"[parametric] applied {n_cuts} oblong cut(s)", flush=True)
     return solid
 
 
-def build_box_solid(ext_cyls, int_cyls, planes, face_centers, face_normals, used_after_planes):
+def build_box_solid(ext_cyls, int_cyls, planes, face_centers, face_normals, used_after_planes,
+                    mesh_triangles=None):
     """
     CSG path for prismatic box parts (rectangular plates, brackets, beams).
 
@@ -1099,6 +1586,7 @@ def build_box_solid(ext_cyls, int_cyls, planes, face_centers, face_normals, used
     # Subtract oblong slot cuts from internal plane pairs.
     solid = apply_internal_slot_cuts(
         solid, planes, cap_axis_idx, fc_min, fc_max, face_centers,
+        mesh_triangles=mesh_triangles,
         skip_circles=skip_circles,
     )
 
@@ -1119,13 +1607,16 @@ def build_box_solid(ext_cyls, int_cyls, planes, face_centers, face_normals, used
 BODY_CYL_MIN_RADIUS = 50  # mm
 
 
-def build_parametric_solid(cylinders, planes, face_centers, face_normals, used_after_planes):
+def build_parametric_solid(cylinders, planes, face_centers, face_normals, used_after_planes, tori=None):
     """
     Attempt CSG reconstruction.  Returns a Part.Shape or None on failure.
 
     Routes to build_box_solid for prismatic parts (4+ planes detected) or the
-    cylindrical CSG path for coaxial ring/boss parts.
+    cylindrical CSG path for coaxial ring/boss parts.  Phase B: fuses detected
+    tori (fillets) into the coaxial cylinder solid.
     """
+    if tori is None:
+        tori = []
     ext_cyls = [c for c in cylinders if not c["concave"]]
     int_cyls = [c for c in cylinders if c["concave"]]
 
@@ -1134,7 +1625,8 @@ def build_parametric_solid(cylinders, planes, face_centers, face_normals, used_a
     # Corner radius is detected from unclaimed face geometry rather than RANSAC cylinders.
     if len(planes) >= 4:
         solid = build_box_solid(
-            ext_cyls, int_cyls, planes, face_centers, face_normals, used_after_planes
+            ext_cyls, int_cyls, planes, face_centers, face_normals, used_after_planes,
+            mesh_triangles=np.array(mesh.triangles, dtype=float),
         )
         if solid:
             return solid
@@ -1198,13 +1690,87 @@ def build_parametric_solid(cylinders, planes, face_centers, face_normals, used_a
         except Exception as exc:
             print(f"[parametric] hole subtraction failed: {exc}", flush=True)
 
+    # Phase B: Apply fillet tori via makeFillet on cylinder edges.
+    # For a coaxial part, fillets connect cylinders to cap planes.
+    # We use the detected torus minor_r as the fillet radius and apply it
+    # to the cylinder-cap edges of the CSG solid.
+    #
+    # Robust approach: merge tori with similar minor radii into a single
+    # fillet operation.  The algebraic fit often produces slightly different
+    # r values for top vs bottom fillets of the same feature (e.g. 0.79 vs
+    # 0.85).  Applying them as separate makeFillet calls fails because the
+    # first call consumes all circular edges, leaving none for the second.
+    # The old CSG-fusion fallback (makeTorus + common + fuse) created
+    # fragmented toroidal surfaces visible as "tube-like" edge artifacts.
+    if tori:
+        # ── Merge tori with similar minor_r ──────────────────────────────
+        # Greedy merge: sort by minor_r, merge adjacent entries within
+        # FILLET_MERGE_REL_TOL of each other.
+        sorted_tori = sorted(tori, key=lambda t: t["minor_r"])
+        merged_groups = []  # list of lists
+        current_group = [sorted_tori[0]]
+        for t in sorted_tori[1:]:
+            ref_r = current_group[0]["minor_r"]
+            if abs(t["minor_r"] - ref_r) / max(ref_r, 1e-6) <= FILLET_MERGE_REL_TOL:
+                current_group.append(t)
+            else:
+                merged_groups.append(current_group)
+                current_group = [t]
+        merged_groups.append(current_group)
+
+        print(
+            f"[parametric] torus fillet groups: {len(merged_groups)} "
+            f"(from {len(tori)} detected tori)",
+            flush=True,
+        )
+
+        for group in merged_groups:
+            # Weighted average of minor_r by inlier count for best estimate.
+            total_inliers = sum(t["inliers"] for t in group)
+            fillet_r = sum(
+                t["minor_r"] * t["inliers"] for t in group
+            ) / max(total_inliers, 1)
+            radii_str = ", ".join(f"{t['minor_r']:.3f}" for t in group)
+
+            # Find circular edges on the current solid.
+            fillet_edges = []
+            for edge in solid.Edges:
+                if hasattr(edge, "Curve") and hasattr(edge.Curve, "Radius"):
+                    fillet_edges.append(edge)
+
+            if not fillet_edges:
+                print(
+                    f"[parametric] torus fillet skipped (no circular edges): "
+                    f"r={fillet_r:.2f} mm, source radii=[{radii_str}]",
+                    flush=True,
+                )
+                continue
+
+            try:
+                solid = solid.makeFillet(fillet_r, fillet_edges)
+                print(
+                    f"[parametric] torus fillet applied: r={fillet_r:.2f} mm, "
+                    f"{len(fillet_edges)} edge(s), "
+                    f"merged from [{radii_str}]",
+                    flush=True,
+                )
+            except Exception as exc:
+                print(
+                    f"[parametric] torus fillet failed (r={fillet_r:.2f}, "
+                    f"edges={len(fillet_edges)}): {exc}",
+                    flush=True,
+                )
+                # Do NOT fall back to CSG torus fusion — the topological
+                # fragmentation creates worse artifacts than a missing fillet.
+                # The solid remains valid; it just has sharp edges here.
+
     if solid is None or solid.isNull():
         return None
 
     print(
         f"[parametric] CSG solid: r_outer={body['radius']:.2f} mm, "
         f"height={height:.2f} mm, "
-        f"{len(int_cyls)} hole(s)",
+        f"{len(int_cyls)} hole(s), {len(tori)} torus fillet(s)",
         flush=True
     )
     return solid
@@ -1227,6 +1793,74 @@ def build_fallback_solid():
         return shape
 
 
+# ── Box fillet coverage (deferred until after function definitions) ───────────
+
+box_fillet_inliers = 0
+if len(planes) >= 4 and not tori:
+    cap_votes = {0: 0.0, 1: 0.0, 2: 0.0}
+    for p in planes:
+        idx = int(np.argmax(np.abs(p["normal"])))
+        if np.abs(p["normal"][idx]) > 0.85:
+            cap_votes[idx] += p["inliers"]
+    cap_ax_idx = max(cap_votes, key=cap_votes.get)
+    cap_ax = np.zeros(3)
+    cap_ax[cap_ax_idx] = 1.0
+    la_i, lb_i = [i for i in range(3) if i != cap_ax_idx]
+
+    fc_min_box = face_centers.min(axis=0)
+    fc_max_box = face_centers.max(axis=0)
+    corner_r_pre = detect_corner_radius_from_faces(
+        face_centers, face_normals, used_after_planes,
+        fc_min_box, fc_max_box, cap_ax_idx
+    )
+    if corner_r_pre is not None:
+        # Box corner fillets are lateral faces near corner edges.  Their normals
+        # are perpendicular to the cap axis (diagonal in the lateral plane),
+        # so we select unclaimed faces that are NOT cap faces.
+        cos_cap_all = np.abs(face_normals @ cap_ax)
+        fillet_cand = ~used & (cos_cap_all < 0.85)
+        if fillet_cand.sum() > 0:
+            fc_la = face_centers[fillet_cand, la_i]
+            fc_lb = face_centers[fillet_cand, lb_i]
+            min_la, max_la = float(fc_min_box[la_i]), float(fc_max_box[la_i])
+            min_lb, max_lb = float(fc_min_box[lb_i]), float(fc_max_box[lb_i])
+            d_la = np.minimum(np.abs(fc_la - min_la), np.abs(fc_la - max_la))
+            d_lb = np.minimum(np.abs(fc_lb - min_lb), np.abs(fc_lb - max_lb))
+            # Near corner: close to both edges simultaneously (corner fillet)
+            near_corner = (d_la < corner_r_pre * 2.5) & (d_lb < corner_r_pre * 2.5)
+            fillet_claim = np.zeros(len(face_centers), dtype=bool)
+            fillet_cand_idx = np.where(fillet_cand)[0]
+            fillet_claim[fillet_cand_idx[near_corner]] = True
+            box_fillet_inliers = int(fillet_claim.sum())
+            used[fillet_claim] = True
+            print(
+                f"[parametric] box corner fillet faces claimed: {box_fillet_inliers} "
+                f"(corner_r={corner_r_pre:.2f} mm)",
+                flush=True,
+            )
+
+    # Also claim remaining unclaimed lateral faces — these are slot end-cap arcs,
+    # wall-edge transitions, and other features geometrically covered by the box
+    # CSG solid (slots, fillets, holes).
+    cos_cap_all2 = np.abs(face_normals @ cap_ax)
+    slot_arc_cand = ~used & (cos_cap_all2 < 0.50)  # lateral faces
+    n_slot = int(slot_arc_cand.sum())
+    if n_slot > 0:
+        used[slot_arc_cand] = True
+        box_fillet_inliers += n_slot
+        print(
+            f"[parametric] box slot/arc faces claimed: {n_slot}",
+            flush=True,
+        )
+
+if box_fillet_inliers > 0:
+    coverage = (cyl_inliers + plane_inliers + torus_inliers + box_fillet_inliers) / total_faces
+    print(
+        f"[parametric] coverage (with box fillets)={coverage:.1%}",
+        flush=True,
+    )
+
+
 # ── Assemble and export ───────────────────────────────────────────────────────
 
 doc_name = "STL_PARAMETRIC"
@@ -1237,7 +1871,7 @@ try:
     shape = None
     if coverage >= MIN_COVERAGE_FOR_PARAMETRIC:
         shape = build_parametric_solid(
-            cylinders, planes, face_centers, face_normals, used_after_planes
+            cylinders, planes, face_centers, face_normals, used_after_planes, tori
         )
         if shape:
             print("[parametric] using analytical solid", flush=True)

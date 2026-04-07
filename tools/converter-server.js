@@ -593,7 +593,7 @@ async function handleConversion(req, res) {
   }
 }
 
-function runFreeCadParametricConversion(freeCadRuntime, inputPath, outputPath) {
+function runFreeCadParametricConversion(freeCadRuntime, inputPath, outputPath, onProgress) {
   return new Promise((resolve, reject) => {
     const commandArgs = [...(freeCadRuntime.args || []), parametricConverterScript, inputPath, outputPath];
     const processHandle = spawn(freeCadRuntime.executable, commandArgs, {
@@ -602,13 +602,29 @@ function runFreeCadParametricConversion(freeCadRuntime, inputPath, outputPath) {
 
     const stdoutChunks = [];
     const stderrChunks = [];
+    let lineBuf = "";
 
-    processHandle.stdout.on("data", chunk => stdoutChunks.push(chunk));
+    processHandle.stdout.on("data", chunk => {
+      stdoutChunks.push(chunk);
+      if (onProgress) {
+        lineBuf += chunk.toString("utf8");
+        const lines = lineBuf.split("\n");
+        lineBuf = lines.pop(); // keep incomplete last line in buffer
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (trimmed) onProgress(trimmed);
+        }
+      }
+    });
     processHandle.stderr.on("data", chunk => stderrChunks.push(chunk));
 
     processHandle.on("error", error => reject(error));
 
     processHandle.on("close", code => {
+      // Flush remaining partial line
+      if (onProgress && lineBuf.trim()) {
+        onProgress(lineBuf.trim());
+      }
       const stdout = Buffer.concat(stdoutChunks).toString("utf8").trim();
       const stderr = Buffer.concat(stderrChunks).toString("utf8").trim();
 
@@ -621,6 +637,37 @@ function runFreeCadParametricConversion(freeCadRuntime, inputPath, outputPath) {
       reject(new Error(message));
     });
   });
+}
+
+function parseParametricMetrics(stdout) {
+  const coverageMatch = stdout.match(/coverage=(\d+\.?\d*)%/);
+  const cylMatch      = stdout.match(/\((\d+) cyl,/);
+  const planeMatch    = stdout.match(/(\d+) plane,?\s/);
+  const torusMatch    = stdout.match(/(\d+) torus/);
+
+  const totalMatch  = stdout.match(/loaded (\d+) triangles/);
+  const horizMatch  = stdout.match(/(\d+) horiz \(cyl\)/);
+  const vertMatch   = stdout.match(/(\d+) vert \(plane\)/);
+  const filletMatch = stdout.match(/(\d+) fillet\/other/);
+
+  function pct(count, total) {
+    return (total > 0) ? ((count / total) * 100).toFixed(1) : "";
+  }
+  const total  = totalMatch  ? Number(totalMatch[1])  : 0;
+  const horiz  = horizMatch  ? Number(horizMatch[1])  : 0;
+  const vert   = vertMatch   ? Number(vertMatch[1])   : 0;
+  const fillet = filletMatch ? Number(filletMatch[1]) : 0;
+
+  return {
+    analytical:  stdout.includes("using analytical solid"),
+    coverage:    coverageMatch ? coverageMatch[1] : "",
+    cylinders:   cylMatch      ? cylMatch[1]      : "",
+    planes:      planeMatch    ? planeMatch[1]    : "",
+    tori:        torusMatch    ? torusMatch[1]    : "",
+    pctCyl:      pct(horiz,  total),
+    pctPlane:    pct(vert,   total),
+    pctFillet:   pct(fillet, total)
+  };
 }
 
 async function handleStlToStepParametricConversion(req, res) {
@@ -638,6 +685,9 @@ async function handleStlToStepParametricConversion(req, res) {
     return;
   }
 
+  const parsedUrl = new URL(req.url, `http://${req.headers.host || "localhost"}`);
+  const streaming = parsedUrl.searchParams.get("stream") === "true";
+
   let tempDir = "";
   try {
     const body = await readRequestBody(req);
@@ -652,10 +702,31 @@ async function handleStlToStepParametricConversion(req, res) {
     const outputPath = path.join(tempDir, outputName);
 
     fs.writeFileSync(inputPath, body);
-    console.log(`[parametric] starting conversion: ${incomingName}`);
+    console.log(`[parametric] starting conversion: ${incomingName} (stream=${streaming})`);
+
+    // Progress callback: in streaming mode, forward each [parametric] line to the client.
+    let onProgress = null;
+    if (streaming) {
+      res.writeHead(200, {
+        "Content-Type": "application/x-ndjson",
+        "Cache-Control": "no-cache",
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type"
+      });
+      onProgress = (line) => {
+        const msg = line.replace(/^\[parametric\]\s*/, "");
+        // Filter out noisy debug lines — only forward phase headers and results.
+        if (/REJECTED|failed|skip|degenerate/i.test(msg) && !/falling back/i.test(msg)) return;
+        // Skip raw file paths (final output path from Python script)
+        if (/^[A-Z]:\\|^\/tmp\//.test(msg)) return;
+        res.write(JSON.stringify({ type: "progress", message: msg }) + "\n");
+      };
+    }
+
     let result;
     try {
-      result = await runFreeCadParametricConversion(freeCadRuntime, inputPath, outputPath);
+      result = await runFreeCadParametricConversion(freeCadRuntime, inputPath, outputPath, onProgress);
     } catch (convErr) {
       console.error("[parametric] FreeCAD process failed:\n" + convErr.message);
       throw convErr;
@@ -668,41 +739,39 @@ async function handleStlToStepParametricConversion(req, res) {
     }
 
     const outputBuffer = fs.readFileSync(outputPath);
-    const usedAnalytical = result.stdout.includes("using analytical solid");
+    const metrics = parseParametricMetrics(result.stdout);
 
-    const coverageMatch = result.stdout.match(/coverage=(\d+\.?\d*)%/);
-    const cylMatch      = result.stdout.match(/\((\d+) cyl,/);
-    const planeMatch    = result.stdout.match(/(\d+) plane,?\s/);
-    const torusMatch    = result.stdout.match(/(\d+) torus/);
-
-    const totalMatch  = result.stdout.match(/loaded (\d+) triangles/);
-    const horizMatch  = result.stdout.match(/(\d+) horiz \(cyl\)/);
-    const vertMatch   = result.stdout.match(/(\d+) vert \(plane\)/);
-    const filletMatch = result.stdout.match(/(\d+) fillet\/other/);
-
-    function pct(count, total) {
-      return (total > 0) ? ((count / total) * 100).toFixed(1) : "";
+    if (streaming) {
+      // Send final completion event with metadata + base64-encoded STEP file.
+      res.write(JSON.stringify({
+        type: "complete",
+        filename: outputName,
+        meta: metrics,
+        data: outputBuffer.toString("base64")
+      }) + "\n");
+      res.end();
+    } else {
+      sendBinary(res, 200, "model/step", outputBuffer, outputName, {
+        "X-Converter-Method":    "freecad-parametric",
+        "X-Analytical-Surfaces": metrics.analytical ? "true" : "false",
+        "X-Coverage":            metrics.coverage,
+        "X-Detected-Cylinders":  metrics.cylinders,
+        "X-Detected-Planes":     metrics.planes,
+        "X-Detected-Tori":       metrics.tori,
+        "X-Pct-Cyl":             metrics.pctCyl,
+        "X-Pct-Plane":           metrics.pctPlane,
+        "X-Pct-Fillet":          metrics.pctFillet
+      });
     }
-    const total  = totalMatch  ? Number(totalMatch[1])  : 0;
-    const horiz  = horizMatch  ? Number(horizMatch[1])  : 0;
-    const vert   = vertMatch   ? Number(vertMatch[1])   : 0;
-    const fillet = filletMatch ? Number(filletMatch[1]) : 0;
-
-    sendBinary(res, 200, "model/step", outputBuffer, outputName, {
-      "X-Converter-Method":    "freecad-parametric",
-      "X-Analytical-Surfaces": usedAnalytical ? "true" : "false",
-      "X-Coverage":            coverageMatch ? coverageMatch[1] : "",
-      "X-Detected-Cylinders":  cylMatch      ? cylMatch[1]      : "",
-      "X-Detected-Planes":     planeMatch    ? planeMatch[1]    : "",
-      "X-Detected-Tori":       torusMatch    ? torusMatch[1]    : "",
-      "X-Pct-Cyl":             pct(horiz,  total),
-      "X-Pct-Plane":           pct(vert,   total),
-      "X-Pct-Fillet":          pct(fillet, total)
-    });
   } catch (error) {
-    sendJson(res, 500, {
-      error: `STL to STEP (parametric) conversion failed: ${error.message}`
-    });
+    if (streaming && res.headersSent) {
+      res.write(JSON.stringify({ type: "error", message: error.message }) + "\n");
+      res.end();
+    } else {
+      sendJson(res, 500, {
+        error: `STL to STEP (parametric) conversion failed: ${error.message}`
+      });
+    }
   } finally {
     if (tempDir && exists(tempDir)) {
       fs.rmSync(tempDir, { recursive: true, force: true });

@@ -122,6 +122,19 @@ TORUS_MAX_ROUNDS            = 10    # max RANSAC rounds for tori
 # forcing a CSG-fusion fallback that creates topological artifacts.
 FILLET_MERGE_REL_TOL        = 0.25  # 25 % relative tolerance on minor_r
 
+# ── Phase B.5: Sphere detection ──────────────────────────────────────────────
+RANSAC_DIST_THRESHOLD_SPHERE = 0.20  # mm – point-to-sphere-surface tolerance
+SPHERE_MIN_INLIERS           = 30    # minimum faces for a valid sphere
+SPHERE_MAX_ROUNDS            = 15    # max RANSAC rounds for spheres
+
+# ── Phase B.5: Blind hole depth inference ────────────────────────────────────
+# Ratio of face-centre depth span to part height.  Below this → blind hole.
+# Set conservatively low because intersecting slot cuts can remove portions of
+# a through-hole's cylindrical wall, reducing the apparent face-centre span
+# (e.g. baseplate center hole: 12mm part, faces span Y=4–8 due to crossing
+# slots on both sides, giving ratio 0.33 even though it's through).
+BLIND_HOLE_DEPTH_RATIO       = 0.25
+
 
 # ── Load mesh ─────────────────────────────────────────────────────────────────
 
@@ -160,8 +173,10 @@ print(
 def detect_cylinders(pts, nrm, base_mask, used, min_abs, thresh, max_iter, total):
     """Iterative RANSAC over candidate faces; updates shared `used` mask in-place."""
     results = []
+    _cyl_axes = []        # track axes for early-exit on non-cylindrical geometry
+    _claimed_indices = []  # track claimed face indices for rollback on early-exit
 
-    for _ in range(10):
+    for round_i in range(10):
         avail = base_mask & ~used
         if avail.sum() < min_abs:
             break
@@ -175,8 +190,30 @@ def detect_cylinders(pts, nrm, base_mask, used, min_abs, thresh, max_iter, total
         if inl is None or len(inl) < min_abs:
             break
 
+        # Early exit: after 3 rounds, check if axes are consistent.  On non-
+        # cylindrical geometry (e.g. spheres) RANSAC finds great-circle slices
+        # with wildly varying axes — 10 rounds × 3000 iters wastes minutes.
+        axis_n_pre = np.array(axis, dtype=float)
+        axis_n_pre /= max(np.linalg.norm(axis_n_pre), 1e-9)
+        _cyl_axes.append(axis_n_pre)
+        if round_i == 2 and len(_cyl_axes) == 3:
+            dots = [abs(float(np.dot(_cyl_axes[i], _cyl_axes[j])))
+                    for i in range(3) for j in range(i+1, 3)]
+            if max(dots) < COAXIAL_DOT_THRESHOLD:
+                print(
+                    "[parametric]   cyl early-exit: axes divergent after 3 rounds "
+                    f"(max dot={max(dots):.3f}), likely non-cylindrical geometry",
+                    flush=True,
+                )
+                # Rollback: un-claim all faces from previous rounds + discard results.
+                for idx_arr in _claimed_indices:
+                    used[idx_arr] = False
+                return []
+
         avail_idx = np.where(avail)[0]
-        used[avail_idx[inl]] = True
+        claimed = avail_idx[inl]
+        used[claimed] = True
+        _claimed_indices.append(claimed)
 
         axis_n  = np.array(axis,   dtype=float)
         axis_n /= np.linalg.norm(axis_n)
@@ -576,6 +613,100 @@ def detect_tori(face_centers, face_normals, used, body_axis, body_center,
     return results
 
 
+# ── Phase B.5: Sphere detection ──────────────────────────────────────────────
+
+def detect_spheres(pts, nrm, used, total):
+    """
+    Iterative RANSAC sphere detection on unclaimed faces.
+
+    Uses pyransac3d.Sphere to fit spherical surfaces.  Classifies each sphere
+    as convex (outward normals → solid body) or concave (inward normals →
+    cavity) based on the mean dot product of face normals with the radial
+    direction from the sphere centre.
+
+    Returns list of dicts: {center, radius, concave, inliers, inlier_mask}.
+    """
+    avail = ~used
+    n_avail = int(avail.sum())
+    if n_avail < SPHERE_MIN_INLIERS:
+        return []
+
+    avail_idx = np.where(avail)[0]
+    avail_pts = pts[avail_idx]
+    avail_nrm = nrm[avail_idx]
+
+    remaining = np.ones(len(avail_idx), dtype=bool)
+    results = []
+
+    for round_i in range(SPHERE_MAX_ROUNDS):
+        n_rem = int(remaining.sum())
+        if n_rem < SPHERE_MIN_INLIERS:
+            break
+
+        sph = pyrsc.Sphere()
+        try:
+            center, radius, inl = sph.fit(
+                avail_pts[remaining], RANSAC_DIST_THRESHOLD_SPHERE,
+                maxIteration=RANSAC_ITERATIONS,
+            )
+        except Exception as exc:
+            print(f"[parametric] sphere RANSAC round {round_i+1} failed: {exc}", flush=True)
+            break
+
+        if inl is None or len(inl) < SPHERE_MIN_INLIERS:
+            break
+
+        radius = float(radius)
+        center = np.array(center, dtype=float)
+
+        # Map inliers back to avail_idx space.
+        rem_idx = np.where(remaining)[0]
+        inl_local = rem_idx[inl]
+
+        inl_pts = avail_pts[inl_local]
+        inl_nrm = avail_nrm[inl_local]
+
+        # Concavity: normals pointing inward (toward centre) → concave (cavity).
+        radial = inl_pts - center
+        r_len = np.linalg.norm(radial, axis=1, keepdims=True)
+        r_len = np.where(r_len < 1e-9, 1.0, r_len)
+        rad_unit = radial / r_len
+        dot_avg = float(np.einsum("ij,ij->i", inl_nrm, rad_unit).mean())
+        concave = dot_avg < 0
+
+        # Radius sanity: reject degenerate fits.
+        if radius < 0.5 or radius > 500.0:
+            print(
+                f"[parametric]   sphere round {round_i+1}: "
+                f"r={radius:.2f} outside [0.5, 500], skip",
+                flush=True,
+            )
+            remaining[inl_local] = False
+            continue
+
+        # Build global inlier mask.
+        global_mask = np.zeros(total, dtype=bool)
+        global_mask[avail_idx[inl_local]] = True
+
+        results.append({
+            "center":      center,
+            "radius":      radius,
+            "concave":     concave,
+            "inliers":     len(inl_local),
+            "inlier_mask": global_mask,
+        })
+
+        remaining[inl_local] = False
+        print(
+            f"[parametric]   sphere {len(results)}: r={radius:.2f} mm, "
+            f"center=({center[0]:+.1f},{center[1]:+.1f},{center[2]:+.1f}), "
+            f"{'concave' if concave else 'convex'}, inliers={len(inl_local)}",
+            flush=True,
+        )
+
+    return results
+
+
 # ── Run detection ─────────────────────────────────────────────────────────────
 # Planes are detected first across ALL faces using a normal-alignment filter.
 # This correctly separates flat surfaces (consistent normals) from curved faces
@@ -666,11 +797,19 @@ if cylinders:
 
 torus_inliers = sum(t["inliers"] for t in tori)
 
+# Phase B.5: Detect spheres on all unclaimed faces.
+print("[parametric] detecting spheres …", flush=True)
+spheres = detect_spheres(face_centers, face_normals, used, total_faces)
+for s in spheres:
+    used[s["inlier_mask"]] = True
+sphere_inliers = sum(s["inliers"] for s in spheres)
+
 # Preliminary coverage (box fillet claiming deferred until after function definitions).
-coverage = (cyl_inliers + plane_inliers + torus_inliers) / total_faces
+coverage = (cyl_inliers + plane_inliers + torus_inliers + sphere_inliers) / total_faces
 print(
     f"[parametric] coverage={coverage:.1%}  "
-    f"({len(cylinders)} cyl, {len(planes)} plane, {len(tori)} torus)",
+    f"({len(cylinders)} cyl, {len(planes)} plane, {len(tori)} torus, "
+    f"{len(spheres)} sphere)",
     flush=True
 )
 
@@ -1125,13 +1264,23 @@ def detect_circle_holes(
 
         cx_la = float(center_n[la])
         cx_lb = float(center_n[lb])
+
+        # Depth extent along cap axis for blind-hole detection (Phase B.5-1).
+        cap_coords = cl_pts[:, cap_axis_idx]
+        depth_min = float(cap_coords.min())
+        depth_max = float(cap_coords.max())
+
         print(
             f"[parametric]   cluster {ci+1}: CIRCLE r={r:.2f} mm, "
             f"center=({cx_la:+.1f},{cx_lb:+.1f}), "
-            f"arc={np.degrees(arc_coverage):.0f}°, inliers={len(inl)}",
+            f"arc={np.degrees(arc_coverage):.0f}°, "
+            f"depth=[{depth_min:.2f},{depth_max:.2f}], inliers={len(inl)}",
             flush=True,
         )
-        holes.append({"center_la": cx_la, "center_lb": cx_lb, "radius": r})
+        holes.append({
+            "center_la": cx_la, "center_lb": cx_lb, "radius": r,
+            "depth_min": depth_min, "depth_max": depth_max,
+        })
         skip_circles.append((cx_la, cx_lb, r))
 
     return holes, skip_circles
@@ -1561,11 +1710,35 @@ def build_box_solid(ext_cyls, int_cyls, planes, face_centers, face_normals, used
         cap_axis_v, cap_axis_idx, la, lb, fc_min, fc_max,
     )
 
-    part_h  = float(fc_max[cap_axis_idx] - fc_min[cap_axis_idx])
-    cut_y0  = float(fc_min[cap_axis_idx]) - 0.5
-    cut_h   = part_h + 1.0
+    part_h     = float(fc_max[cap_axis_idx] - fc_min[cap_axis_idx])
+    part_lo    = float(fc_min[cap_axis_idx])
+    part_hi    = float(fc_max[cap_axis_idx])
 
     for ch in circle_holes:
+        # Phase B.5-1: classify through-hole vs blind hole from face depth span.
+        d_min = ch.get("depth_min", part_lo)
+        d_max = ch.get("depth_max", part_hi)
+        depth_span = d_max - d_min
+
+        if depth_span > BLIND_HOLE_DEPTH_RATIO * part_h:
+            # Through-hole: cut full height with margin both sides.
+            cut_y0 = part_lo - HOLE_CUT_MARGIN
+            cut_h  = part_h + 2.0 * HOLE_CUT_MARGIN
+            hole_kind = "through"
+        else:
+            # Blind hole: determine which face it opens from.
+            dist_to_lo = d_min - part_lo
+            dist_to_hi = part_hi - d_max
+            if dist_to_lo <= dist_to_hi:
+                # Opens from bottom face — extend opening downward, cap at depth_max
+                cut_y0 = part_lo - HOLE_CUT_MARGIN
+                cut_h  = (d_max - part_lo) + HOLE_CUT_MARGIN
+            else:
+                # Opens from top face — cap at depth_min, extend opening upward
+                cut_y0 = d_min
+                cut_h  = (part_hi - d_min) + HOLE_CUT_MARGIN
+            hole_kind = f"blind(depth={depth_span:.1f}mm)"
+
         cyl_base = np.zeros(3)
         cyl_base[la]           = ch["center_la"]
         cyl_base[lb]           = ch["center_lb"]
@@ -1577,7 +1750,8 @@ def build_box_solid(ext_cyls, int_cyls, planes, face_centers, face_normals, used
             solid = solid.cut(cyl_solid)
             print(
                 f"[parametric] circle hole cut: r={ch['radius']:.2f} mm, "
-                f"center=({ch['center_la']:+.1f},{ch['center_lb']:+.1f})",
+                f"center=({ch['center_la']:+.1f},{ch['center_lb']:+.1f}), "
+                f"{hole_kind}",
                 flush=True,
             )
         except Exception as exc:
@@ -1607,16 +1781,78 @@ def build_box_solid(ext_cyls, int_cyls, planes, face_centers, face_normals, used
 BODY_CYL_MIN_RADIUS = 50  # mm
 
 
-def build_parametric_solid(cylinders, planes, face_centers, face_normals, used_after_planes, tori=None):
+def build_sphere_solid(spheres):
+    """
+    CSG path for sphere-dominated geometry (Phase B.5-2).
+
+    Builds a solid from detected spheres by fusing convex spheres and cutting
+    concave ones.  Sorts by radius (largest first) for stable boolean ops.
+
+    Returns a Part.Shape or None on failure.
+    """
+    if not spheres:
+        return None
+
+    def fv(v):
+        return FreeCAD.Vector(float(v[0]), float(v[1]), float(v[2]))
+
+    # Sort by radius (largest first) for stable boolean operations.
+    sorted_spheres = sorted(spheres, key=lambda s: s["radius"], reverse=True)
+
+    s0 = sorted_spheres[0]
+    try:
+        solid = Part.makeSphere(s0["radius"], fv(s0["center"]))
+    except Exception as exc:
+        print(f"[parametric] first sphere build failed: {exc}", flush=True)
+        return None
+
+    print(
+        f"[parametric] sphere base: r={s0['radius']:.2f} mm, "
+        f"center=({s0['center'][0]:+.1f},{s0['center'][1]:+.1f},{s0['center'][2]:+.1f})",
+        flush=True,
+    )
+
+    for si, s in enumerate(sorted_spheres[1:], 2):
+        try:
+            sph = Part.makeSphere(s["radius"], fv(s["center"]))
+            if s["concave"]:
+                solid = solid.cut(sph)
+                op = "cut"
+            else:
+                solid = solid.fuse(sph)
+                op = "fused"
+            print(
+                f"[parametric] sphere {si} {op}: r={s['radius']:.2f} mm, "
+                f"center=({s['center'][0]:+.1f},{s['center'][1]:+.1f},{s['center'][2]:+.1f})",
+                flush=True,
+            )
+        except Exception as exc:
+            print(f"[parametric] sphere {si} boolean failed: {exc}", flush=True)
+
+    if solid is None or solid.isNull():
+        return None
+
+    print(
+        f"[parametric] sphere CSG solid: {len(sorted_spheres)} sphere(s)",
+        flush=True,
+    )
+    return solid
+
+
+def build_parametric_solid(cylinders, planes, face_centers, face_normals, used_after_planes,
+                           tori=None, spheres=None):
     """
     Attempt CSG reconstruction.  Returns a Part.Shape or None on failure.
 
-    Routes to build_box_solid for prismatic parts (4+ planes detected) or the
-    cylindrical CSG path for coaxial ring/boss parts.  Phase B: fuses detected
-    tori (fillets) into the coaxial cylinder solid.
+    Routes to build_box_solid for prismatic parts (4+ planes detected),
+    the cylindrical CSG path for coaxial ring/boss parts, or the sphere
+    path for sphere-dominated geometry.  Phase B: fuses detected tori
+    (fillets) into the coaxial cylinder solid.
     """
     if tori is None:
         tori = []
+    if spheres is None:
+        spheres = []
     ext_cyls = [c for c in cylinders if not c["concave"]]
     int_cyls = [c for c in cylinders if c["concave"]]
 
@@ -1634,13 +1870,20 @@ def build_parametric_solid(cylinders, planes, face_centers, face_normals, used_a
 
     # Cylindrical path: one large outer cylinder = body; inner = holes.
     if not cylinders:
+        # No cylinders — try sphere path before giving up.
+        if spheres:
+            print(f"[parametric] no cylinders — trying sphere path ({len(spheres)} spheres)", flush=True)
+            return build_sphere_solid(spheres)
         return None
 
     if not axes_are_coaxial(cylinders):
         print(
-            "[parametric] cylinders are not coaxial — skipping parametric build",
+            "[parametric] cylinders are not coaxial — skipping cylindrical path",
             flush=True
         )
+        if spheres:
+            print(f"[parametric] trying sphere path ({len(spheres)} spheres)", flush=True)
+            return build_sphere_solid(spheres)
         return None
 
     if not ext_cyls:
@@ -1854,7 +2097,7 @@ if len(planes) >= 4 and not tori:
         )
 
 if box_fillet_inliers > 0:
-    coverage = (cyl_inliers + plane_inliers + torus_inliers + box_fillet_inliers) / total_faces
+    coverage = (cyl_inliers + plane_inliers + torus_inliers + sphere_inliers + box_fillet_inliers) / total_faces
     print(
         f"[parametric] coverage (with box fillets)={coverage:.1%}",
         flush=True,
@@ -1871,7 +2114,8 @@ try:
     shape = None
     if coverage >= MIN_COVERAGE_FOR_PARAMETRIC:
         shape = build_parametric_solid(
-            cylinders, planes, face_centers, face_normals, used_after_planes, tori
+            cylinders, planes, face_centers, face_normals, used_after_planes,
+            tori, spheres,
         )
         if shape:
             print("[parametric] using analytical solid", flush=True)

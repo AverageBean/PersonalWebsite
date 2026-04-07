@@ -65,7 +65,23 @@
       "Bash(\"C:/Program Files/FreeCAD 1.0/bin/python.exe\" \"C:/Users/berry/WebstormProjects/PersonalWebsite/tools/diagnose-cross-section.py\" \"C:/Users/berry/WebstormProjects/PersonalWebsite/Testoutput/baseplate_phaseB5_tess.stl\")",
       "Bash(C:/Program Files/FreeCAD 1.0/bin/FreeCADCmd.exe:*)",
       "Bash(xargs grep:*)",
-      "Bash(grep -l \"MeshRing1\\\\|torus fillet applied\" /c/Users/berry/WebstormProjects/PersonalWebsite/tmp-converter*.log)"
+      "Bash(grep -l \"MeshRing1\\\\|torus fillet applied\" /c/Users/berry/WebstormProjects/PersonalWebsite/tmp-converter*.log)",
+      "Bash(\"C:/Program Files/FreeCAD 1.0/bin/python.exe\" tools/compare-step-to-stl.py \"TestDocs/Station_3_Baseplate - Part 1.stl\" Testoutput/2026-04-07_baseplate_B5_regression.step)",
+      "Bash(\"C:/Program Files/FreeCAD 1.0/bin/python.exe\" tools/compare-step-to-stl.py TestDocs/MeshRing1.stl Testoutput/2026-04-07_ring_B5_regression.step)",
+      "Bash(\"C:/Program Files/FreeCAD 1.0/bin/python.exe\" tools/compare-step-to-stl.py TestDocs/MeshRing1-mold-top.stl Testoutput/2026-04-07_mold_top_B5.step)",
+      "Bash(\"C:/Program Files/FreeCAD 1.0/bin/python.exe\" tools/convert-stl-to-step-parametric-with-freecad.py TestDocs/MeshRing1-mold-top.stl Testoutput/mold_debug.step)",
+      "Bash(time C:/Program:*)",
+      "Bash(\"C:/Program Files/FreeCAD 1.0/bin/python.exe\" tools/compare-step-to-stl.py TestDocs/Spheres.stl Testoutput/spheres_timing_test.step)",
+      "Bash(time \"C:/Program Files/FreeCAD 1.0/bin/python.exe\" tools/convert-stl-to-step-parametric-with-freecad.py TestDocs/MeshRing1.stl Testoutput/ring_timing_test.step)",
+      "Bash(time \"C:/Program Files/FreeCAD 1.0/bin/python.exe\" tools/convert-stl-to-step-parametric-with-freecad.py \"TestDocs/Station_3_Baseplate - Part 1.stl\" Testoutput/baseplate_timing_test.step)",
+      "Bash(tasklist)",
+      "Bash(\"C:/Program Files/FreeCAD 1.0/bin/python.exe\" tools/convert-stl-to-step-parametric-with-freecad.py \"TestDocs/Station_3_Baseplate - Part 1.stl\" Testoutput/baseplate_debug_blind.step)",
+      "Bash(\"C:/Program Files/FreeCAD 1.0/bin/python.exe\" tools/convert-stl-to-step-parametric-with-freecad.py \"TestDocs/Station_3_Baseplate - Part 1.stl\" Testoutput/baseplate_fixed.step)",
+      "Bash(\"C:/Program Files/FreeCAD 1.0/bin/python.exe\" tools/convert-stl-to-step-parametric-with-freecad.py TestDocs/MeshRing1-mold-top.stl Testoutput/mold_fixed.step)",
+      "Bash(\"C:/Program Files/FreeCAD 1.0/bin/python.exe\" tools/convert-stl-to-step-parametric-with-freecad.py \"TestDocs/Station_3_Baseplate - Part 1.stl\" Testoutput/baseplate_debug2.step)",
+      "Bash(\"C:/Program Files/FreeCAD 1.0/bin/python.exe\" tools/convert-stl-to-step-parametric-with-freecad.py \"TestDocs/Station_3_Baseplate - Part 1.stl\" Testoutput/baseplate_fixed2.step)",
+      "Bash(\"C:/Program Files/FreeCAD 1.0/bin/python.exe\" tools/convert-stl-to-step-parametric-with-freecad.py TestDocs/MeshRing1-mold-top.stl Testoutput/mold_fixed2.step)",
+      "Bash(\"C:/Program Files/FreeCAD 1.0/bin/python.exe\" tools/compare-step-to-stl.py \"TestDocs/Station_3_Baseplate - Part 1.stl\" Testoutput/baseplate_fixed2.step)"
     ]
   }
 }

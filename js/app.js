@@ -1840,6 +1840,100 @@ document.addEventListener("DOMContentLoaded", () => {
     return { buffer: await response.arrayBuffer(), meta };
   }
 
+  /**
+   * Streaming parametric STEP conversion with real-time progress.
+   * Sends the STL blob and reads NDJSON progress lines, calling onProgress
+   * for each line.  Returns {blob, meta} on completion.
+   */
+  async function convertStlBlobToStepStreaming(stlBlob, filename, onProgress) {
+    const url = `${CONVERTER_API_BASE}/api/convert/stl-to-step-parametric?filename=${encodeURIComponent(filename)}&stream=true`;
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/octet-stream" },
+      body: stlBlob
+    });
+
+    if (!response.ok) {
+      let details = "The converter service rejected the file.";
+      try {
+        const payload = await response.json();
+        if (payload && payload.error) details = payload.error;
+      } catch (_) {
+        const fallbackText = await response.text();
+        if (fallbackText) details = fallbackText;
+      }
+      throw new Error(details);
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let completionEvent = null;
+
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      const lines = buffer.split("\n");
+      buffer = lines.pop(); // keep incomplete last line
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        try {
+          const event = JSON.parse(trimmed);
+          if (event.type === "progress" && onProgress) {
+            onProgress(event.message);
+          } else if (event.type === "complete") {
+            completionEvent = event;
+          } else if (event.type === "error") {
+            throw new Error(event.message);
+          }
+        } catch (parseErr) {
+          if (parseErr.message && !parseErr.message.includes("JSON"))
+            throw parseErr;
+          // Skip malformed JSON lines
+        }
+      }
+    }
+
+    // Process any remaining data in buffer
+    if (buffer.trim()) {
+      try {
+        const event = JSON.parse(buffer.trim());
+        if (event.type === "complete") completionEvent = event;
+        else if (event.type === "error") throw new Error(event.message);
+      } catch (_) { /* ignore */ }
+    }
+
+    if (!completionEvent) {
+      throw new Error("Conversion stream ended without a completion event.");
+    }
+
+    // Decode base64 STEP data
+    const binaryStr = atob(completionEvent.data);
+    const bytes = new Uint8Array(binaryStr.length);
+    for (let i = 0; i < binaryStr.length; i++) {
+      bytes[i] = binaryStr.charCodeAt(i);
+    }
+
+    const meta = {
+      analytical: completionEvent.meta.analytical,
+      coverage:   completionEvent.meta.coverage   || null,
+      cylinders:  completionEvent.meta.cylinders   || null,
+      planes:     completionEvent.meta.planes      || null,
+      pctCyl:     completionEvent.meta.pctCyl      || null,
+      pctPlane:   completionEvent.meta.pctPlane    || null,
+      pctFillet:  completionEvent.meta.pctFillet   || null
+    };
+
+    return {
+      blob: new Blob([bytes], { type: "model/step" }),
+      meta
+    };
+  }
+
   function getFriendlySldprtErrorMessage(rawMessage) {
     const message = String(rawMessage || "").trim();
     const normalized = message.toLowerCase();
@@ -2175,9 +2269,50 @@ document.addEventListener("DOMContentLoaded", () => {
       }
       const stlBlob = new Blob([stlContent], { type: "model/stl" });
       const stem = sanitizeFileStem(currentFileStem);
-      const endpoint = formatKey === "step-parametric"
-        ? "/api/convert/stl-to-step-parametric"
-        : "/api/convert/stl-to-step";
+
+      if (formatKey === "step-parametric") {
+        // Use streaming endpoint for real-time progress feedback.
+        const { blob, meta } = await convertStlBlobToStepStreaming(
+          stlBlob, `${stem}.stl`,
+          (msg) => {
+            // Show user-friendly phase summaries in the status bar.
+            let display = msg;
+            if (/^loaded (\d+) triangles/.test(msg)) {
+              display = msg.replace("loaded", "Loaded");
+            } else if (/^pre-filter:/.test(msg)) {
+              display = "Classifying face normals\u2026";
+            } else if (/^detecting planes/.test(msg)) {
+              display = "Detecting flat surfaces\u2026";
+            } else if (/^detecting cylinders/.test(msg)) {
+              display = "Detecting cylindrical surfaces\u2026";
+            } else if (/^detecting tori/.test(msg)) {
+              display = "Detecting fillets & tori\u2026";
+            } else if (/^detecting spheres/.test(msg)) {
+              display = "Detecting spherical surfaces\u2026";
+            } else if (/^coverage=/.test(msg)) {
+              display = "Coverage: " + msg.replace("coverage=", "");
+            } else if (/^(CSG solid|box CSG|sphere CSG|trying)/.test(msg)) {
+              display = "Building solid\u2026";
+            } else if (/^using analytical/.test(msg)) {
+              display = "Analytical surfaces built successfully";
+            } else if (/^using triangulated/.test(msg)) {
+              display = "Using triangulated fallback";
+            } else if (/^torus (detect|clusters|cleanup)/.test(msg)) {
+              // Intermediate fillet details — skip, phase header already shown
+              return;
+            } else if (/^torus fillet (groups|applied)/.test(msg)) {
+              display = msg.replace(/^torus fillet /, "Fillet ");
+            } else if (/^(cyl|plane|torus|sphere)\b/.test(msg)) {
+              // Individual detection result — show as-is
+              display = msg;
+            }
+            setStatus(`Parametric STEP \u2014 ${display}`);
+          }
+        );
+        return { blob, meta };
+      }
+
+      const endpoint = "/api/convert/stl-to-step";
       const { buffer, meta } = await convertStlBlobToStep(stlBlob, `${stem}.stl`, endpoint);
       return { blob: new Blob([buffer], { type: EXPORT_FORMATS.step.mime }), meta };
     }

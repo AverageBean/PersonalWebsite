@@ -223,13 +223,20 @@ try:
             sprue_z = top_vertex.z
             print(f"[mold] Sprue placed at top vertex: X={sprue_x:.1f}, Z={sprue_z:.1f}", file=sys.stderr)
 
-        sprue_height = (block_ymin + block_ylen) - split_y + 1.0  # through to top + margin
+        # Start the sprue at the model's top surface so it only cuts through
+        # solid mold material above the model.  A small overlap (0.1 mm) into
+        # the model ensures a clean boolean gate where the sprue meets the
+        # cavity — without extending through the cavity and widening the part.
+        sprue_bottom = bb.YMax - 0.1
+        sprue_top = block_ymin + block_ylen + 0.5
+        sprue_height = sprue_top - sprue_bottom
+        print(f"[mold] Sprue channel: Y={sprue_bottom:.1f} to {sprue_top:.1f} (gate at model top)", file=sys.stderr)
 
         print("[mold] Adding sprue channel...", file=sys.stderr)
         sprue = Part.makeCylinder(
             sprue_dia / 2.0,
             sprue_height,
-            FreeCAD.Vector(sprue_x, split_y - 0.5, sprue_z),  # start just below split
+            FreeCAD.Vector(sprue_x, sprue_bottom, sprue_z),
             FreeCAD.Vector(0, 1, 0)
         )
         top_half = top_half.cut(sprue)

@@ -1099,6 +1099,10 @@ SLOT_MAX_WIDTH = 25.0  # mm — maximum plausible slot width
 # oblong ends span ~180°.
 CIRCLE_MIN_ARC_RAD = np.radians(270)
 CIRCLE_CLUSTER_RADIUS = 8.0  # mm — XZ proximity radius for face clustering
+# Minimum radius (mm) for a circle hole to be eligible for cavity-floor plane
+# reclassification.  Small pin holes use face-centre depth; large cavities need
+# plane-derived depth because prior detection passes leave unreliable remnant faces.
+CAVITY_FLOOR_MIN_RADIUS = 8.0
 
 
 def detect_circle_holes(
@@ -1112,9 +1116,12 @@ def detect_circle_holes(
     Distinguishes full circles (angular coverage > 270°) from semicircular oblong
     ends (coverage ~ 180°) using the spread of face normals around the cylinder axis.
 
-    Returns a list of dicts {center_la, center_lb, radius} plus a list of
-    circle_footprints [(center_la, center_lb, radius)] for suppressing
-    redundant slot-pair cuts at the same locations.
+    Returns (holes, skip_circles, posts, partial_arcs):
+      - holes: list of concave (hole) dicts {center_la, center_lb, radius, ...}
+      - skip_circles: [(center_la, center_lb, radius)] for slot suppression
+      - posts: list of convex (post/boss) dicts, same shape as holes
+      - partial_arcs: list of dicts {center_la, center_lb, n_faces} for rejected
+        partial-arc clusters (arc < 270°); used for inner-ring boundary estimation
     """
     # Unclaimed tight-lateral faces (very perpendicular to cap axis, not already a plane).
     cos_cap = np.abs(face_normals @ cap_axis)
@@ -1130,7 +1137,7 @@ def detect_circle_holes(
 
     # BFS clustering in the XZ lateral plane.
     remaining = np.ones(len(lat_idx), dtype=bool)
-    clusters  = []
+    raw_clusters = []
     while remaining.sum() >= 20:
         seed_i = np.where(remaining)[0][0]
         seed   = np.array([lat_fc[seed_i, la], lat_fc[seed_i, lb]])
@@ -1146,11 +1153,15 @@ def detect_circle_holes(
         cl_mask = in_cl & remaining
         remaining[cl_mask] = False
         if cl_mask.sum() >= 20:
-            clusters.append(np.where(cl_mask)[0])
+            raw_clusters.append(np.where(cl_mask)[0])
+
+    clusters = raw_clusters
 
     print(f"[parametric] circle detect: {len(clusters)} face clusters", flush=True)
 
     holes        = []
+    posts        = []  # convex cylinders (inner ring post / boss)
+    partial_arcs = []  # rejected partial-arc clusters (arc < 270°)
     skip_circles = []  # (center_la, center_lb, r) for slot suppression
 
     for ci, cl in enumerate(clusters):
@@ -1176,12 +1187,33 @@ def detect_circle_holes(
             print(
                 f"[parametric]   cluster {ci+1}: {n_cl} faces, "
                 f"({ctr_a:+.1f},{ctr_b:+.1f}), "
-                f"arc={np.degrees(arc_coverage):.0f}° < 270° — partial arc (oblong end), skip",
+                f"arc={np.degrees(arc_coverage):.0f}° < 270° — partial arc, skip",
                 flush=True,
             )
+            partial_arcs.append({
+                "center_la": ctr_a, "center_lb": ctr_b, "n_faces": n_cl,
+            })
             continue
 
-        # Run RANSAC on this cluster alone to find cylinder r and axis.
+        # Always run deterministic 2D algebraic circle fit first.
+        # RANSAC radius varies across runs; 2D fit is stable and preferred
+        # for geometric decisions (depth classification, ring pairing).
+        pts_2d = cl_pts[:, [la, lb]]  # (N, 2)
+        A_2d = np.column_stack([pts_2d, np.ones(len(pts_2d))])
+        b_2d = (pts_2d ** 2).sum(axis=1)
+        fit2d_ok = False
+        try:
+            sol_2d, _, _, _ = np.linalg.lstsq(A_2d, b_2d, rcond=None)
+            cx_2d = sol_2d[0] / 2.0
+            cy_2d = sol_2d[1] / 2.0
+            r_2d = float(np.sqrt(sol_2d[2] + cx_2d**2 + cy_2d**2))
+            dists_2d = np.sqrt((pts_2d[:, 0] - cx_2d)**2 + (pts_2d[:, 1] - cy_2d)**2)
+            residual_2d = float(np.abs(dists_2d - r_2d).mean())
+            fit2d_ok = residual_2d <= 0.5
+        except Exception:
+            pass
+
+        # Run RANSAC for concavity classification (needs 3D normals).
         ransac_ok = False
         cyl = pyrsc.Cylinder()
         try:
@@ -1197,30 +1229,12 @@ def detect_circle_holes(
         except Exception as exc:
             print(f"[parametric]   cluster {ci+1}: RANSAC failed: {exc}", flush=True)
 
-        # Fallback: 2D algebraic circle fit in the lateral plane.
-        # This handles cases where the faces form a ring in the XZ plane
-        # but RANSAC can't determine the cap-axis direction (e.g. small
-        # center holes where all faces are at nearly the same Y height).
-        if not ransac_ok:
-            pts_2d = cl_pts[:, [la, lb]]  # (N, 2)
-            A = np.column_stack([pts_2d, np.ones(len(pts_2d))])
-            b = (pts_2d ** 2).sum(axis=1)
-            try:
-                sol, _, _, _ = np.linalg.lstsq(A, b, rcond=None)
-                cx_2d = sol[0] / 2.0
-                cy_2d = sol[1] / 2.0
-                r = float(np.sqrt(sol[2] + cx_2d**2 + cy_2d**2))
-                # Validate: residuals should be small
-                dists = np.sqrt((pts_2d[:, 0] - cx_2d)**2 + (pts_2d[:, 1] - cy_2d)**2)
-                residual = float(np.abs(dists - r).mean())
-                if residual > 0.5:
-                    print(
-                        f"[parametric]   cluster {ci+1}: 2D circle fit poor "
-                        f"(residual={residual:.3f}mm), skip",
-                        flush=True,
-                    )
-                    continue
-                # Build 3D center on the cap axis at the cluster's mean position
+        # Use 2D fit radius (deterministic) when available.  Fall back to
+        # RANSAC radius or pure 2D fit when RANSAC axis is misaligned.
+        if fit2d_ok:
+            r = r_2d
+            if not ransac_ok:
+                # RANSAC axis bad — build centre/axis from 2D fit.
                 center_n = np.zeros(3)
                 center_n[la] = cx_2d
                 center_n[lb] = cy_2d
@@ -1229,12 +1243,15 @@ def detect_circle_holes(
                 inl = np.arange(len(cl_pts))
                 print(
                     f"[parametric]   cluster {ci+1}: RANSAC axis misaligned, "
-                    f"using 2D circle fit (r={r:.2f}mm, residual={residual:.3f}mm)",
+                    f"using 2D circle fit (r={r:.2f}mm, residual={residual_2d:.3f}mm)",
                     flush=True,
                 )
-            except Exception as exc:
-                print(f"[parametric]   cluster {ci+1}: 2D circle fit failed: {exc}", flush=True)
-                continue
+        elif not ransac_ok:
+            print(
+                f"[parametric]   cluster {ci+1}: both fits failed, skip",
+                flush=True,
+            )
+            continue
 
         # Must be small enough to be a through-hole.
         max_dim = float(min(fc_max[la] - fc_min[la], fc_max[lb] - fc_min[lb]))
@@ -1245,7 +1262,7 @@ def detect_circle_holes(
             )
             continue
 
-        # Concavity check.
+        # Concavity check: classify as hole (concave) or post (convex).
         inl_pts = cl_pts[inl]
         inl_nrm = cl_nrm[inl]
         t        = np.einsum("ij,j->i", inl_pts - center_n, axis_n)
@@ -1255,12 +1272,7 @@ def detect_circle_holes(
         r_len    = np.where(r_len < 1e-9, 1.0, r_len)
         rad_unit = radial / r_len
         dot_avg  = float(np.einsum("ij,ij->i", inl_nrm, rad_unit).mean())
-        if dot_avg >= 0:
-            print(
-                f"[parametric]   cluster {ci+1}: convex (dot={dot_avg:.2f}), skip",
-                flush=True,
-            )
-            continue
+        is_convex = dot_avg >= 0
 
         cx_la = float(center_n[la])
         cx_lb = float(center_n[lb])
@@ -1270,20 +1282,70 @@ def detect_circle_holes(
         depth_min = float(cap_coords.min())
         depth_max = float(cap_coords.max())
 
-        print(
-            f"[parametric]   cluster {ci+1}: CIRCLE r={r:.2f} mm, "
-            f"center=({cx_la:+.1f},{cx_lb:+.1f}), "
-            f"arc={np.degrees(arc_coverage):.0f}°, "
-            f"depth=[{depth_min:.2f},{depth_max:.2f}], inliers={len(inl)}",
-            flush=True,
-        )
-        holes.append({
+        entry = {
             "center_la": cx_la, "center_lb": cx_lb, "radius": r,
             "depth_min": depth_min, "depth_max": depth_max,
-        })
-        skip_circles.append((cx_la, cx_lb, r))
+        }
 
-    return holes, skip_circles
+        if is_convex:
+            print(
+                f"[parametric]   cluster {ci+1}: POST r={r:.2f} mm, "
+                f"center=({cx_la:+.1f},{cx_lb:+.1f}), "
+                f"arc={np.degrees(arc_coverage):.0f}°, "
+                f"dot={dot_avg:.2f}, inliers={len(inl)}",
+                flush=True,
+            )
+            posts.append(entry)
+        else:
+            print(
+                f"[parametric]   cluster {ci+1}: CIRCLE r={r:.2f} mm, "
+                f"center=({cx_la:+.1f},{cx_lb:+.1f}), "
+                f"arc={np.degrees(arc_coverage):.0f}°, "
+                f"depth=[{depth_min:.2f},{depth_max:.2f}], inliers={len(inl)}",
+                flush=True,
+            )
+            holes.append(entry)
+            skip_circles.append((cx_la, cx_lb, r))
+
+    # Merge co-located holes — circles at the same XZ centre with similar radius
+    # but detected at different Y heights (e.g. sprue tessellation producing
+    # multiple thin face rings).  Combine their depth ranges so depth
+    # classification sees the full extent.
+    MERGE_XZ_TOL = 2.0   # mm — max XZ distance between centres to merge
+    MERGE_R_TOL  = 1.0   # mm — max radius difference to merge
+    merged_holes = []
+    merged_flags = [False] * len(holes)
+    for i, hi in enumerate(holes):
+        if merged_flags[i]:
+            continue
+        group = [hi]
+        for j in range(i + 1, len(holes)):
+            if merged_flags[j]:
+                continue
+            hj = holes[j]
+            xz_dist = np.sqrt((hi["center_la"] - hj["center_la"])**2 +
+                              (hi["center_lb"] - hj["center_lb"])**2)
+            if xz_dist < MERGE_XZ_TOL and abs(hi["radius"] - hj["radius"]) < MERGE_R_TOL:
+                group.append(hj)
+                merged_flags[j] = True
+        if len(group) == 1:
+            merged_holes.append(hi)
+        else:
+            combined = dict(hi)
+            combined["depth_min"] = min(h["depth_min"] for h in group)
+            combined["depth_max"] = max(h["depth_max"] for h in group)
+            combined["radius"] = float(np.mean([h["radius"] for h in group]))
+            print(
+                f"[parametric] merged {len(group)} co-located circles at "
+                f"({combined['center_la']:+.1f},{combined['center_lb']:+.1f}) "
+                f"r={combined['radius']:.2f} -> depth=[{combined['depth_min']:.2f},"
+                f"{combined['depth_max']:.2f}]",
+                flush=True,
+            )
+            merged_holes.append(combined)
+    holes = merged_holes
+
+    return holes, skip_circles, posts, partial_arcs
 
 
 def apply_internal_slot_cuts(
@@ -1705,7 +1767,7 @@ def build_box_solid(ext_cyls, int_cyls, planes, face_centers, face_normals, used
     # Must run before slot cuts so circle positions can suppress redundant slot pairs.
     cap_axis_v = np.zeros(3); cap_axis_v[cap_axis_idx] = 1.0
     la, lb = [i for i in range(3) if i != cap_axis_idx]
-    circle_holes, skip_circles = detect_circle_holes(
+    circle_holes, skip_circles, circle_posts, partial_arcs = detect_circle_holes(
         face_centers, face_normals, used_after_planes,
         cap_axis_v, cap_axis_idx, la, lb, fc_min, fc_max,
     )
@@ -1714,31 +1776,227 @@ def build_box_solid(ext_cyls, int_cyls, planes, face_centers, face_normals, used
     part_lo    = float(fc_min[cap_axis_idx])
     part_hi    = float(fc_max[cap_axis_idx])
 
-    for ch in circle_holes:
-        # Phase B.5-1: classify through-hole vs blind hole from face depth span.
+    # ── Phase C-0: cavity-floor plane detection for large holes ─────────
+    # Prior detection passes (cylinder/torus/sphere RANSAC) consume most faces
+    # from large cavities, leaving scattered remnants with unreliable depth
+    # spans.  For large holes, cross-reference with interior cap-aligned planes
+    # to determine the true cavity depth.
+    interior_planes = []
+    for p in planes:
+        if abs(p["normal"][cap_axis_idx]) < 0.85:
+            continue
+        pt_on_plane = -p["d"] * p["normal"]
+        pos = float(np.dot(pt_on_plane, cap_axis_v))
+        # Interior plane: between part boundaries (with 0.5mm margin)
+        if pos > part_lo + 0.5 and pos < part_hi - 0.5:
+            # Compute XZ bounding box of the plane's inlier faces.
+            if "indices" in p and len(p["indices"]) > 0:
+                pfc = face_centers[p["indices"]]
+                interior_planes.append({
+                    "pos": pos,
+                    "inliers": p["inliers"],
+                    "la_min": float(pfc[:, la].min()),
+                    "la_max": float(pfc[:, la].max()),
+                    "lb_min": float(pfc[:, lb].min()),
+                    "lb_max": float(pfc[:, lb].max()),
+                })
+    if interior_planes:
+        print(
+            f"[parametric] cavity-floor candidates: "
+            + ", ".join(f"pos={ip['pos']:.2f}mm ({ip['inliers']} faces)" for ip in interior_planes),
+            flush=True,
+        )
+
+    # ── Phase C-0: ring pocket pairing (concentric hole + post) ─────────
+    # Match convex posts to concave holes at the same XZ center.  A matching
+    # pair indicates an annular (ring-shaped) pocket, not a simple hole.
+    RING_PAIR_CENTER_TOL = 5.0  # mm — max XZ center distance to pair
+    ring_pockets = []
+    paired_hole_indices = set()
+    for post in circle_posts:
+        for hi, hole in enumerate(circle_holes):
+            if hi in paired_hole_indices:
+                continue
+            dist_la = abs(hole["center_la"] - post["center_la"])
+            dist_lb = abs(hole["center_lb"] - post["center_lb"])
+            if dist_la < RING_PAIR_CENTER_TOL and dist_lb < RING_PAIR_CENTER_TOL:
+                if post["radius"] < hole["radius"]:
+                    ring_pockets.append({
+                        "outer_r": hole["radius"],
+                        "inner_r": post["radius"],
+                        "radius": hole["radius"],  # for _classify_hole_depth
+                        "center_la": hole["center_la"],
+                        "center_lb": hole["center_lb"],
+                        "depth_min": hole["depth_min"],
+                        "depth_max": hole["depth_max"],
+                    })
+                    paired_hole_indices.add(hi)
+                    print(
+                        f"[parametric] ring pocket paired: outer_r={hole['radius']:.2f}, "
+                        f"inner_r={post['radius']:.2f}, "
+                        f"center=({hole['center_la']:+.1f},{hole['center_lb']:+.1f})",
+                        flush=True,
+                    )
+                    break
+
+    # ── Phase C-0: inner-ring estimation from partial-arc clusters ─────
+    # When a large hole has no paired post but multiple partial-arc clusters
+    # surround it at a consistent radius, they trace the inner wall of a ring-
+    # shaped cavity.  Fit a circle to these cluster centroids to estimate the
+    # inner cylinder radius, then promote to a ring pocket.
+    for hi, hole in enumerate(circle_holes):
+        if hi in paired_hole_indices:
+            continue
+        if hole["radius"] < CAVITY_FLOOR_MIN_RADIUS:
+            continue
+        # Collect partial arcs whose centre lies within the hole's footprint.
+        hla, hlb = hole["center_la"], hole["center_lb"]
+        nearby_arcs = []
+        for pa in partial_arcs:
+            dist = np.sqrt((pa["center_la"] - hla)**2 + (pa["center_lb"] - hlb)**2)
+            if dist < hole["radius"] * 1.1:
+                nearby_arcs.append(pa)
+        if len(nearby_arcs) < 3:
+            continue
+        # Fit a circle to the partial-arc centroids in the lateral plane.
+        pa_pts = np.array([[a["center_la"], a["center_lb"]] for a in nearby_arcs])
+        A_fit = np.column_stack([pa_pts, np.ones(len(pa_pts))])
+        b_fit = (pa_pts**2).sum(axis=1)
+        try:
+            sol, _, _, _ = np.linalg.lstsq(A_fit, b_fit, rcond=None)
+            cx = sol[0] / 2.0
+            cz = sol[1] / 2.0
+            inner_r = float(np.sqrt(sol[2] + cx**2 + cz**2))
+        except Exception:
+            continue
+        if inner_r < 1.0 or inner_r >= hole["radius"]:
+            continue
+        ring_pockets.append({
+            "outer_r": hole["radius"],
+            "inner_r": inner_r,
+            "radius": hole["radius"],  # for _classify_hole_depth
+            "center_la": hole["center_la"],
+            "center_lb": hole["center_lb"],
+            "depth_min": hole["depth_min"],
+            "depth_max": hole["depth_max"],
+        })
+        paired_hole_indices.add(hi)
+        print(
+            f"[parametric] ring pocket (partial-arc): outer_r={hole['radius']:.2f}, "
+            f"inner_r={inner_r:.2f} (from {len(nearby_arcs)} arcs), "
+            f"center=({hole['center_la']:+.1f},{hole['center_lb']:+.1f})",
+            flush=True,
+        )
+
+    # Unpaired holes are processed normally.
+    unpaired_holes = [h for i, h in enumerate(circle_holes) if i not in paired_hole_indices]
+
+    def _classify_hole_depth(ch):
+        """Classify a circle hole as through or blind, using interior planes
+        for large holes where face-centre depth is unreliable."""
         d_min = ch.get("depth_min", part_lo)
         d_max = ch.get("depth_max", part_hi)
         depth_span = d_max - d_min
 
+        # For large holes, try to find a cavity-floor plane that overlaps
+        # the hole's XZ position.  This is more reliable than face-centre
+        # depth when prior detection passes consumed most faces.
+        if ch["radius"] >= CAVITY_FLOOR_MIN_RADIUS and interior_planes:
+            best_floor = None
+            for ip in interior_planes:
+                # Check that the plane covers the hole center in XZ.
+                if (ip["la_min"] <= ch["center_la"] <= ip["la_max"] and
+                        ip["lb_min"] <= ch["center_lb"] <= ip["lb_max"]):
+                    # Pick the floor plane with the most inliers.
+                    if best_floor is None or ip["inliers"] > best_floor["inliers"]:
+                        best_floor = ip
+            if best_floor is not None:
+                floor_pos = best_floor["pos"]
+                # The cavity opens from whichever box face is further from the floor.
+                dist_to_lo = floor_pos - part_lo
+                dist_to_hi = part_hi - floor_pos
+                if dist_to_lo <= dist_to_hi:
+                    # Floor is near the bottom → cavity opens from the bottom.
+                    cut_y0 = part_lo - HOLE_CUT_MARGIN
+                    cut_h  = (floor_pos - part_lo) + HOLE_CUT_MARGIN
+                else:
+                    # Floor is near the top → cavity opens from the top.
+                    cut_y0 = floor_pos
+                    cut_h  = (part_hi - floor_pos) + HOLE_CUT_MARGIN
+                kind = f"blind-floor(depth={min(dist_to_lo, dist_to_hi):.1f}mm, plane@{floor_pos:.2f})"
+                return cut_y0, cut_h, kind
+
+        # Default: face-centre depth classification (Phase B.5-1).
         if depth_span > BLIND_HOLE_DEPTH_RATIO * part_h:
-            # Through-hole: cut full height with margin both sides.
             cut_y0 = part_lo - HOLE_CUT_MARGIN
             cut_h  = part_h + 2.0 * HOLE_CUT_MARGIN
-            hole_kind = "through"
+            return cut_y0, cut_h, "through"
         else:
-            # Blind hole: determine which face it opens from.
             dist_to_lo = d_min - part_lo
             dist_to_hi = part_hi - d_max
             if dist_to_lo <= dist_to_hi:
-                # Opens from bottom face — extend opening downward, cap at depth_max
                 cut_y0 = part_lo - HOLE_CUT_MARGIN
                 cut_h  = (d_max - part_lo) + HOLE_CUT_MARGIN
             else:
-                # Opens from top face — cap at depth_min, extend opening upward
                 cut_y0 = d_min
                 cut_h  = (part_hi - d_min) + HOLE_CUT_MARGIN
-            hole_kind = f"blind(depth={depth_span:.1f}mm)"
+            return cut_y0, cut_h, f"blind(depth={depth_span:.1f}mm)"
 
+    # ── Cut ring pockets using a torus CSG shape ──────────────────────
+    # The partial-arc centroid radius (inner_r) approximates the torus
+    # major radius.  The tube radius is estimated from the cavity depth
+    # (half the blind-cut height), giving a better fit than concentric
+    # cylinders against the curved ring surface.
+    for rp in ring_pockets:
+        cut_y0, cut_h, hole_kind = _classify_hole_depth(rp)
+
+        # Estimate torus geometry.  R_major comes from the deterministic
+        # partial-arc centroid radius (torus centre line).  The tube radius
+        # is constrained by the cavity depth (half the blind-cut height).
+        R_major = rp["inner_r"]   # partial-arc centroid ≈ torus centre
+        r_tube  = cut_h / 2.0
+
+        # Position the torus at the mid-depth of the cavity.
+        torus_center = np.zeros(3)
+        torus_center[la]           = rp["center_la"]
+        torus_center[lb]           = rp["center_lb"]
+        torus_center[cap_axis_idx] = cut_y0 + cut_h / 2.0
+
+        try:
+            torus_solid = Part.makeTorus(
+                R_major, r_tube, fv(torus_center), fv(cap_axis_v)
+            )
+            solid = solid.cut(torus_solid)
+            print(
+                f"[parametric] ring pocket cut (torus): R={R_major:.2f}, r={r_tube:.2f}, "
+                f"center=({rp['center_la']:+.1f},{rp['center_lb']:+.1f}), "
+                f"{hole_kind}",
+                flush=True,
+            )
+        except Exception as exc:
+            # Fallback: annular cylinder cut if torus fails.
+            print(f"[parametric] torus cut failed ({exc}), falling back to annular cut", flush=True)
+            cyl_base = np.zeros(3)
+            cyl_base[la]           = rp["center_la"]
+            cyl_base[lb]           = rp["center_lb"]
+            cyl_base[cap_axis_idx] = cut_y0
+            try:
+                outer_cyl = Part.makeCylinder(rp["outer_r"], cut_h, fv(cyl_base), fv(cap_axis_v))
+                inner_cyl = Part.makeCylinder(rp["inner_r"], cut_h, fv(cyl_base), fv(cap_axis_v))
+                ring_tool = outer_cyl.cut(inner_cyl)
+                solid = solid.cut(ring_tool)
+                print(
+                    f"[parametric] ring pocket cut (annular fallback): "
+                    f"outer_r={rp['outer_r']:.2f}, inner_r={rp['inner_r']:.2f}, "
+                    f"{hole_kind}",
+                    flush=True,
+                )
+            except Exception as exc2:
+                print(f"[parametric] annular fallback also failed: {exc2}", flush=True)
+
+    # ── Cut unpaired circle holes ───────────────────────────────────────
+    for ch in unpaired_holes:
+        cut_y0, cut_h, hole_kind = _classify_hole_depth(ch)
         cyl_base = np.zeros(3)
         cyl_base[la]           = ch["center_la"]
         cyl_base[lb]           = ch["center_lb"]
@@ -1756,6 +2014,121 @@ def build_box_solid(ext_cyls, int_cyls, planes, face_centers, face_normals, used
             )
         except Exception as exc:
             print(f"[parametric] circle hole cut failed: {exc}", flush=True)
+
+    # ── Second-pass: small cylindrical holes above cavity floor (sprue) ──
+    # Main circle detection uses BFS radius 8mm which merges small features
+    # (sprue channels, r~3mm) with nearby large features (ring walls) when
+    # they overlap in XZ.  This pass uses a tighter cluster radius and only
+    # examines lateral faces above the cavity floor.
+    SPRUE_CLUSTER_RADIUS = 5.0   # mm — tighter than main 8mm
+    SPRUE_MAX_RADIUS     = 5.0   # mm — only small cylindrical holes
+    SPRUE_MIN_ARC_DEG    = 180.0 # degrees — relaxed for partial visibility
+    SPRUE_MIN_FACES      = 10
+
+    sprue_min_cap = part_lo + part_h * 0.5
+    if interior_planes:
+        sprue_min_cap = max(ip["pos"] for ip in interior_planes)
+
+    cos_cap_arr = np.abs(face_normals @ cap_axis_v)
+    sprue_lat_mask = (~used_after_planes &
+                      (cos_cap_arr < 0.25) &
+                      (face_centers[:, cap_axis_idx] > sprue_min_cap))
+    n_sprue_lat = int(sprue_lat_mask.sum())
+
+    if n_sprue_lat >= SPRUE_MIN_FACES:
+        print(f"[parametric] sprue pass: {n_sprue_lat} lateral faces above "
+              f"cap={sprue_min_cap:.1f}", flush=True)
+
+        sp_idx = np.where(sprue_lat_mask)[0]
+        sp_fc  = face_centers[sp_idx]
+        sp_fn  = face_normals[sp_idx]
+
+        sp_remaining = np.ones(len(sp_idx), dtype=bool)
+        sp_clusters  = []
+        while sp_remaining.sum() >= SPRUE_MIN_FACES:
+            seed_i = np.where(sp_remaining)[0][0]
+            in_cl  = np.zeros(len(sp_idx), dtype=bool)
+            in_cl[seed_i] = True
+            prev = 0
+            while in_cl.sum() != prev:
+                prev  = in_cl.sum()
+                ctr_a = float(sp_fc[in_cl, la].mean())
+                ctr_b = float(sp_fc[in_cl, lb].mean())
+                d2    = (sp_fc[:, la] - ctr_a)**2 + (sp_fc[:, lb] - ctr_b)**2
+                in_cl = sp_remaining & (d2 < SPRUE_CLUSTER_RADIUS**2)
+            cl_mask = in_cl & sp_remaining
+            sp_remaining[cl_mask] = False
+            if cl_mask.sum() >= SPRUE_MIN_FACES:
+                sp_clusters.append(np.where(cl_mask)[0])
+
+        for sci, scl in enumerate(sp_clusters):
+            scl_pts = sp_fc[scl]
+            scl_nrm = sp_fn[scl]
+
+            pts_2d = scl_pts[:, [la, lb]]
+            A_2d   = np.column_stack([pts_2d, np.ones(len(pts_2d))])
+            b_2d   = (pts_2d ** 2).sum(axis=1)
+            try:
+                sol_2d, _, _, _ = np.linalg.lstsq(A_2d, b_2d, rcond=None)
+                cx = sol_2d[0] / 2.0
+                cz = sol_2d[1] / 2.0
+                r  = float(np.sqrt(sol_2d[2] + cx**2 + cz**2))
+            except Exception:
+                continue
+
+            if r < 0.5 or r > SPRUE_MAX_RADIUS:
+                print(f"[parametric]   sprue cluster {sci+1}: r={r:.2f} "
+                      f"outside [0.5, {SPRUE_MAX_RADIUS}] -- skip", flush=True)
+                continue
+
+            nla_s    = scl_nrm[:, la]
+            nlb_s    = scl_nrm[:, lb]
+            angles   = np.arctan2(nlb_s, nla_s)
+            sorted_a = np.sort(angles)
+            gaps     = np.diff(sorted_a)
+            wrap_gap = float(sorted_a[0] + 2 * np.pi - sorted_a[-1])
+            max_gap  = float(np.max(np.append(gaps, wrap_gap)))
+            arc_deg  = float(np.degrees(2 * np.pi - max_gap))
+
+            if arc_deg < SPRUE_MIN_ARC_DEG:
+                print(f"[parametric]   sprue cluster {sci+1}: arc={arc_deg:.0f} deg "
+                      f"< {SPRUE_MIN_ARC_DEG} -- skip", flush=True)
+                continue
+
+            already_detected = False
+            for dc in list(unpaired_holes) + list(ring_pockets):
+                xz_dist = np.sqrt((cx - dc["center_la"])**2 +
+                                  (cz - dc["center_lb"])**2)
+                if xz_dist < 2.0 and abs(r - dc["radius"]) < 1.0:
+                    already_detected = True
+                    break
+            if already_detected:
+                continue
+
+            cap_coords = scl_pts[:, cap_axis_idx]
+            d_min = float(cap_coords.min())
+            d_max = float(cap_coords.max())
+
+            print(f"[parametric] sprue detected: r={r:.2f}mm, "
+                  f"center=({cx:+.1f},{cz:+.1f}), arc={arc_deg:.0f} deg, "
+                  f"depth=[{d_min:.2f},{d_max:.2f}]", flush=True)
+
+            ch = {"center_la": cx, "center_lb": cz, "radius": r,
+                  "depth_min": d_min, "depth_max": d_max}
+            cut_y0, cut_h, hole_kind = _classify_hole_depth(ch)
+            cyl_base = np.zeros(3)
+            cyl_base[la]           = cx
+            cyl_base[lb]           = cz
+            cyl_base[cap_axis_idx] = cut_y0
+            try:
+                cyl_solid = Part.makeCylinder(
+                    r, cut_h, fv(cyl_base), fv(cap_axis_v)
+                )
+                solid = solid.cut(cyl_solid)
+                print(f"[parametric] sprue hole cut: r={r:.2f}mm, "
+                      f"{hole_kind}", flush=True)
+            except Exception as exc:
+                print(f"[parametric] sprue cut failed: {exc}", flush=True)
 
     # Subtract oblong slot cuts from internal plane pairs.
     solid = apply_internal_slot_cuts(

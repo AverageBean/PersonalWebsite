@@ -2762,8 +2762,8 @@ document.addEventListener("DOMContentLoaded", () => {
     highlightGeom.setIndex(highlightIndices);
 
     const highlightMat = new THREE.MeshBasicMaterial({
-      color: 0x4499ff,
-      opacity: 0.45,
+      color: 0x44ff44,
+      opacity: 0.65,
       transparent: true,
       depthTest: false,
       side: THREE.DoubleSide
@@ -2893,8 +2893,10 @@ document.addEventListener("DOMContentLoaded", () => {
       const hemisphereGeom = new THREE.SphereGeometry(radius, 12, 6, 0, Math.PI * 2, 0, Math.PI / 2);
 
       // Orient to match surface normal (default hemisphere points +Y)
+      // Negate normal to ensure bumps point outward from surface
+      const outwardNormal = new THREE.Vector3(-bump.normal.x, -bump.normal.y, -bump.normal.z);
       const quaternion = new THREE.Quaternion();
-      quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), bump.normal);
+      quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), outwardNormal);
       const rotMatrix = new THREE.Matrix4().makeRotationFromQuaternion(quaternion);
       hemisphereGeom.applyMatrix4(rotMatrix);
 

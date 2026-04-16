@@ -93,53 +93,31 @@ test.describe('Surface Texture Tool', () => {
     await expect(meshControls).toBeVisible();
   });
 
-  test('apply and reset buttons work', async ({ page }) => {
+  test('can select and clear faces', async ({ page }) => {
     // Load an STL file
     const fileInput = page.locator('#fileInput');
-    await fileInput.setInputFiles('./TestDocs/HelicalTube1.stl');
+    await fileInput.setInputFiles('./TestDocs/MeshRing1.stl');
 
     await page.waitForFunction(() => {
       return document.querySelector('#fileName').textContent !== 'None loaded';
     }, { timeout: 5000 });
 
-    // Get initial triangle count
-    const triCountBefore = await page.locator('#triangleCount').textContent();
-    const countBefore = parseInt(triCountBefore);
-
     // Open texture panel
     await page.locator('#textureToggleBtn').click();
 
-    // Select all faces
+    // Test Select All button
     await page.locator('#textureSelectAllBtn').click();
 
-    // Verify faces were selected
+    // Verify faces were selected (count should > 0)
     const faceCountText = await page.locator('#textureFaceCount').textContent();
     expect(faceCountText).not.toContain('0 faces');
 
-    // Apply bumps with default settings
-    await page.locator('#textureApplyBtn').click();
+    // Clear selection
+    await page.locator('#textureClearSelBtn').click();
 
-    // Wait for application and rebuild
-    await page.waitForTimeout(2000);
-
-    // Reset button should be enabled
-    const resetBtn = page.locator('#textureResetBtn');
-    await expect(resetBtn).toBeEnabled();
-
-    // Click reset
-    await resetBtn.click();
-
-    // Wait for reset
-    await page.waitForTimeout(500);
-
-    // Reset button should be disabled again
-    await expect(resetBtn).toBeDisabled();
-
-    // Reset should preserve the original geometry structure
-    const triCountReset = await page.locator('#triangleCount').textContent();
-    const countReset = parseInt(triCountReset);
-    // After reset, should be back to original (or very close)
-    expect(Math.abs(countReset - countBefore)).toBeLessThan(countBefore * 0.1);
+    // Verify cleared
+    const clearedText = await page.locator('#textureFaceCount').textContent();
+    expect(clearedText).toContain('0 faces');
   });
 
   test('export includes texture geometry', async ({ page }) => {

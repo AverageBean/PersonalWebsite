@@ -2837,21 +2837,32 @@ document.addEventListener("DOMContentLoaded", () => {
     const vertexCount = position.count;
     const newPositionArray = position.array.slice();
 
-    // Collect all vertices from selected faces in original mesh
-    const selectedVertices = [];
-    const origPosition = currentFillMesh.geometry.getAttribute("position");
-    selectedFaceIndices.forEach(fIdx => {
+    // Collect selected face centroids (faster than per-vertex comparison)
+    const selectedCentroids = Array.from(selectedFaceIndices).map(fIdx => {
+      const origPos = currentFillMesh.geometry.getAttribute("position");
       const i0 = fIdx * 3, i1 = fIdx * 3 + 1, i2 = fIdx * 3 + 2;
-      selectedVertices.push(
-        new THREE.Vector3(origPosition.getX(i0), origPosition.getY(i0), origPosition.getZ(i0)),
-        new THREE.Vector3(origPosition.getX(i1), origPosition.getY(i1), origPosition.getZ(i1)),
-        new THREE.Vector3(origPosition.getX(i2), origPosition.getY(i2), origPosition.getZ(i2))
+      return new THREE.Vector3(
+        (origPos.getX(i0) + origPos.getX(i1) + origPos.getX(i2)) / 3,
+        (origPos.getY(i0) + origPos.getY(i1) + origPos.getY(i2)) / 3,
+        (origPos.getZ(i0) + origPos.getZ(i1) + origPos.getZ(i2)) / 3
       );
     });
 
-    // Compute proximity threshold: avg edge length of original mesh * 1.5
+    // Compute proximity threshold
     const originalFaceArea = (bounds.max.x - bounds.min.x) * (bounds.max.z - bounds.min.z) / baseTriCount;
-    const proximityThreshold = Math.sqrt(originalFaceArea) * 1.5;
+    const proximityThreshold = Math.sqrt(originalFaceArea) * 2;
+
+    // Build grid-based spatial lookup for fast proximity queries
+    const gridSize = Math.max(1, proximityThreshold);
+    const grid = new Map();
+    selectedCentroids.forEach(centroid => {
+      const gx = Math.floor(centroid.x / gridSize);
+      const gy = Math.floor(centroid.y / gridSize);
+      const gz = Math.floor(centroid.z / gridSize);
+      const key = `${gx}_${gy}_${gz}`;
+      if (!grid.has(key)) grid.set(key, []);
+      grid.get(key).push(centroid);
+    });
 
     // Apply displacement to vertices in selected regions
     let displacedCount = 0;
@@ -2860,15 +2871,31 @@ document.addEventListener("DOMContentLoaded", () => {
       const vx = newPositionArray[v * 3];
       const vy = newPositionArray[v * 3 + 1];
       const vz = newPositionArray[v * 3 + 2];
-      const currentPos = new THREE.Vector3(vx, vy, vz);
+      const gx = Math.floor(vx / gridSize);
+      const gy = Math.floor(vy / gridSize);
+      const gz = Math.floor(vz / gridSize);
 
-      // Check if this vertex is close to any selected vertex
       let isSelected = false;
-      for (const selVert of selectedVertices) {
-        if (currentPos.distanceTo(selVert) < proximityThreshold) {
-          isSelected = true;
-          break;
+      // Check current cell and neighboring cells
+      for (let dgx = -1; dgx <= 1; dgx++) {
+        for (let dgy = -1; dgy <= 1; dgy++) {
+          for (let dgz = -1; dgz <= 1; dgz++) {
+            const key = `${gx + dgx}_${gy + dgy}_${gz + dgz}`;
+            const cellCentroids = grid.get(key);
+            if (cellCentroids) {
+              const currentPos = new THREE.Vector3(vx, vy, vz);
+              for (const centroid of cellCentroids) {
+                if (currentPos.distanceTo(centroid) < proximityThreshold) {
+                  isSelected = true;
+                  break;
+                }
+              }
+              if (isSelected) break;
+            }
+          }
+          if (isSelected) break;
         }
+        if (isSelected) break;
       }
 
       if (isSelected) {
@@ -2924,26 +2951,31 @@ document.addEventListener("DOMContentLoaded", () => {
 
       if (intersects.length > 0) {
         const intersection = intersects[0];
-        const faceIndex = Math.floor(intersection.point.length / 0.5); // approximate - use intersection.faceIndex if available
+        const hitPoint = intersection.point;
 
-        // Get faceIndex from the intersection
-        let actualFaceIdx = 0;
-        if (intersection.face && typeof intersection.face.a === 'number') {
-          // For indexed geometry, this would work - but we have non-indexed
-          // For non-indexed, estimate from intersection point
-          const pos = currentFillMesh.geometry.getAttribute("position");
-          let minDist = Infinity;
-          for (let f = 0; f < Math.floor(pos.count / 3); f++) {
-            const faceCenter = getFaceCentroid(currentFillMesh.geometry, f);
-            const dist = intersection.point.distanceTo(faceCenter);
-            if (dist < minDist) {
-              minDist = dist;
-              actualFaceIdx = f;
-            }
+        // Find the closest face to the intersection point
+        const pos = currentFillMesh.geometry.getAttribute("position");
+        const faceCount = Math.floor(pos.count / 3);
+        let closestFace = 0;
+        let minDist = Infinity;
+
+        for (let f = 0; f < faceCount; f++) {
+          const i0 = f * 3, i1 = f * 3 + 1, i2 = f * 3 + 2;
+          const v0 = new THREE.Vector3(pos.getX(i0), pos.getY(i0), pos.getZ(i0));
+          const v1 = new THREE.Vector3(pos.getX(i1), pos.getY(i1), pos.getZ(i1));
+          const v2 = new THREE.Vector3(pos.getX(i2), pos.getY(i2), pos.getZ(i2));
+
+          // Compute face center and distance to hit point
+          const faceCenter = new THREE.Vector3().addVectors(v0, v1).add(v2).divideScalar(3);
+          const dist = hitPoint.distanceTo(faceCenter);
+
+          if (dist < minDist) {
+            minDist = dist;
+            closestFace = f;
           }
         }
 
-        selectFaceRegion(actualFaceIdx, e.shiftKey);
+        selectFaceRegion(closestFace, e.shiftKey);
       } else if (!e.shiftKey) {
         selectedFaceIndices.clear();
         updateFaceHighlight();

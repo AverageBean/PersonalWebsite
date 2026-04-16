@@ -1,0 +1,77 @@
+# Home Assistant Automations for Train Detection → AC Infinity Fan Control
+#
+# These automations work with:
+# - ESPHome device: train-detector (provides binary_sensor.train_detected)
+# - AC Infinity integration: dalinicus/homeassistant-acinfinity (provides fan.controller_69_pro)
+# - Helper: input_number.acinfinity_saved_speed (stores pre-train fan percentage)
+#
+# Install by:
+# 1. Copying this file content into Home Assistant's automations.yaml
+# 2. Reloading automations: Developer Tools → YAML → Automations
+# 3. Or creating via UI: Settings → Automations → Create Automation
+
+# Automation 1: Train Detected — Save Current Fan Speed and Ramp Up
+# Triggers when the train_detected binary sensor turns ON
+# Actions:
+#   1. Save the current AC Infinity fan speed to input_number helper
+#   2. Set fan to 80% (speed 8/10) to increase air circulation
+automation:
+  - id: train_detector_ramp_up
+    alias: "Train Detection - Ramp Fan Speed Up"
+    description: "Increase AC Infinity fan speed when train is detected"
+
+    trigger:
+      platform: state
+      entity_id: binary_sensor.train_detected
+      to: "on"
+
+    condition: []
+
+    action:
+      # Step 1: Save current fan speed for restoration later
+      - service: input_number.set_value
+        data:
+          entity_id: input_number.acinfinity_saved_speed
+          value: "{{ state_attr('fan.controller_69_pro', 'percentage') | float(50) }}"
+
+      # Step 2: Ramp fan to 80% (fast air circulation during train passage)
+      - service: fan.set_percentage
+        target:
+          entity_id: fan.controller_69_pro
+        data:
+          percentage: 80
+
+      # Step 3: Log the event
+      - service: logger.log
+        data:
+          level: INFO
+          message: "Train detected - saved fan speed {{ state_attr('fan.controller_69_pro', 'percentage') }} and set to 80%"
+
+  # Automation 2: Train Passed — Restore Previous Fan Speed
+  # Triggers when the train_detected binary sensor turns OFF
+  # (The sensor has a 45-second delayed_off, so this fires 45s after train noise ends)
+  # Action: Restore fan to its pre-train speed
+  - id: train_detector_restore_speed
+    alias: "Train Detection - Restore Fan Speed"
+    description: "Restore AC Infinity fan to previous speed after train passes"
+
+    trigger:
+      platform: state
+      entity_id: binary_sensor.train_detected
+      to: "off"
+
+    condition: []
+
+    action:
+      # Restore fan to saved speed (or default to 30% if no saved value)
+      - service: fan.set_percentage
+        target:
+          entity_id: fan.controller_69_pro
+        data:
+          percentage: "{{ states('input_number.acinfinity_saved_speed') | float(30) }}"
+
+      # Log the event
+      - service: logger.log
+        data:
+          level: INFO
+          message: "Train passed - restored fan speed to {{ states('input_number.acinfinity_saved_speed') }}"

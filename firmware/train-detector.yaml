@@ -1,0 +1,143 @@
+esphome:
+  name: train-detector
+  friendly_name: "Train Detector"
+  platform: ESP32
+  board: esp32dev
+  build_flags:
+    - -DLOG_LOCAL_LEVEL=ESP_LOG_DEBUG
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  power_save_mode: LIGHT
+  fast_connect: true
+
+  # Fallback hotspot for initial setup
+  ap:
+    ssid: "TrainDetector-Fallback"
+    password: "12345678"
+
+captive_portal:
+
+# Native API for Home Assistant communication
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  password: !secret ota_password
+  platform: esphome
+
+# Logging (optional; disable for production)
+logger:
+  level: DEBUG
+
+# Global threshold variable (tunable from Home Assistant)
+globals:
+  - id: sound_threshold
+    type: float
+    restore_value: yes
+    initial_value: '0.65'
+
+# ADC Sensor — reads SEN-12642 AUDIO (envelope) output
+sensor:
+  - platform: adc
+    pin: GPIO34
+    name: "Sound Level Raw"
+    id: sound_level_raw
+    update_interval: 50ms
+    attenuation: 11db
+    unit_of_measurement: "V"
+    device_class: "signal_strength"
+
+    # Filters:
+    # 1. Normalize to 0–1 range (0V → 0.0, 3.3V → 1.0)
+    # 2. Apply sliding window average (10 samples @ 50ms = 500ms window)
+    filters:
+      - multiply: 0.303  # 1/3.3V ≈ 0.303
+      - sliding_window_moving_average:
+          window_size: 10
+          send_every: 5
+
+    on_value:
+      then:
+        - logger.log:
+            format: "Sound Level: %.3f, Threshold: %.3f"
+            args: ['id(sound_level_normalized).state', 'id(sound_threshold)']
+            level: DEBUG
+
+  # Normalized sound level (0–1) for display and detection logic
+  - platform: template
+    name: "Sound Level"
+    id: sound_level_normalized
+    unit_of_measurement: "%"
+    device_class: "signal_strength"
+    accuracy_decimals: 3
+    update_interval: 250ms
+    lambda: |-
+      return id(sound_level_raw).state * 100.0;  // Convert to 0–100%
+
+# Number entity for tuning threshold from Home Assistant
+number:
+  - platform: template
+    name: "Train Detection Threshold"
+    id: threshold_number
+    unit_of_measurement: "%"
+    min_value: 20
+    max_value: 95
+    step: 1
+    accuracy_decimals: 0
+    restore_value: yes
+    initial_value: 65
+
+    set_action:
+      then:
+        - globals.set:
+            id: sound_threshold
+            value: !lambda 'return x / 100.0;'
+        - logger.log:
+            format: "Threshold updated to: %.2f"
+            args: ['id(sound_threshold)']
+            level: INFO
+
+# Binary Sensor — Train Detection
+binary_sensor:
+  - platform: template
+    name: "Train Detected"
+    id: train_detected
+    device_class: "sound"
+
+    # Detection logic: ON when sound level exceeds threshold
+    lambda: |-
+      return id(sound_level_normalized).state > (id(sound_threshold) * 100.0);
+
+    # Debouncing filters:
+    # - delayed_on: 2s  → must sustain above threshold for 2 seconds to avoid false positives
+    # - delayed_off: 45s → train passage duration; once cleared, stay ON for 45s to cover full passage
+    filters:
+      - delayed_on: 2s
+      - delayed_off: 45s
+
+    on_press:
+      then:
+        - logger.log:
+            message: "TRAIN DETECTED - ramping AC Infinity fan to 80%"
+            level: WARN
+
+    on_release:
+      then:
+        - logger.log:
+            message: "Train passed - restoring AC Infinity fan speed"
+            level: WARN
+
+# Status LED (optional; GPIO2 on most ESP32 boards)
+status_led:
+  pin: GPIO2
+
+# Restart button + safe mode for troubleshooting
+button:
+  - platform: restart
+    name: "Restart Device"
+
+  - platform: safe_mode
+    name: "Enter Safe Mode"

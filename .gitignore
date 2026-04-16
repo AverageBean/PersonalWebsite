@@ -22,6 +22,7 @@ tmp-*.err.log
 # Environment / secrets
 .env
 joebox_info.txt
+firmware/secrets.yaml
 
 # Local artifacts
 tools/__pycache__/

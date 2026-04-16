@@ -66,6 +66,21 @@ document.addEventListener("DOMContentLoaded", () => {
   const sliceAxisZRadio = document.getElementById("sliceAxisZ");
   const sliceFlipCheckbox = document.getElementById("sliceFlipCheckbox");
   const sliceCapCheckbox = document.getElementById("sliceCapCheckbox");
+  const textureToggleBtn = document.getElementById("textureToggleBtn");
+  const texturePanel = document.getElementById("texturePanel");
+  const textureFaceCount = document.getElementById("textureFaceCount");
+  const textureClearSelBtn = document.getElementById("textureClearSelBtn");
+  const textureSelectAllBtn = document.getElementById("textureSelectAllBtn");
+  const texturePresetSelect = document.getElementById("texturePresetSelect");
+  const textureBumpsControls = document.getElementById("textureBumpsControls");
+  const textureMeshControls = document.getElementById("textureMeshControls");
+  const bumpHeightInput = document.getElementById("bumpHeightInput");
+  const bumpScaleInput = document.getElementById("bumpScaleInput");
+  const meshHeightInput = document.getElementById("meshHeightInput");
+  const meshCellInput = document.getElementById("meshCellInput");
+  const meshStrandInput = document.getElementById("meshStrandInput");
+  const textureApplyBtn = document.getElementById("textureApplyBtn");
+  const textureResetBtn = document.getElementById("textureResetBtn");
 
   // ── Tab switching ──────────────────────────────────────────────────────
   const tabBtns = document.querySelectorAll('.tab-btn');
@@ -227,6 +242,15 @@ document.addEventListener("DOMContentLoaded", () => {
   let sliceClipPlane = null;
   let slicePreviewPlane = null;
   let sliceInteriorMesh = null;
+  let texturePanelVisible = false;
+  let selectedFaceIndices = new Set();
+  let faceAdjacency = null;
+  let faceCentroids = null;
+  let faceNormalsCache = null;
+  let textureHighlightMesh = null;
+  let preTextureBaseGeometry = null;
+  let textureRaycaster = new THREE.Raycaster();
+  let textureMouse = new THREE.Vector2();
 
   function resizeRenderer() {
     const width = viewerCanvas.clientWidth;
@@ -491,6 +515,17 @@ document.addEventListener("DOMContentLoaded", () => {
       moldToggleBtn.classList.remove("is-active");
       moldToggleBtn.setAttribute("aria-pressed", "false");
     }
+    clearTextureSelection();
+    texturePanelVisible = false;
+    if (texturePanel) texturePanel.style.display = "none";
+    if (textureToggleBtn) {
+      textureToggleBtn.classList.remove("is-active");
+      textureToggleBtn.setAttribute("aria-pressed", "false");
+    }
+    if (preTextureBaseGeometry) {
+      preTextureBaseGeometry.dispose();
+      preTextureBaseGeometry = null;
+    }
     updateExportUiState();
     updateTransformRowState();
   }
@@ -507,6 +542,7 @@ document.addEventListener("DOMContentLoaded", () => {
     if (dimZInput) dimZInput.disabled = !hasModel;
     if (moldToggleBtn) moldToggleBtn.disabled = !hasModel;
     if (sliceToggleBtn) sliceToggleBtn.disabled = !hasModel;
+    if (textureToggleBtn) textureToggleBtn.disabled = !hasModel;
     if (!hasModel) {
       if (dimXInput) dimXInput.value = "";
       if (dimYInput) dimYInput.value = "";
@@ -2578,6 +2614,363 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   });
 
+  // ── Surface texture ────────────────────────────────────────────────────
+
+  function buildFaceAdjacency(geometry) {
+    const position = geometry.getAttribute("position");
+    if (!position) return new Map();
+
+    const faceCount = Math.floor(position.count / 3);
+    const adjacency = new Map();
+    const edgeMap = new Map();
+    const precision = 10000;
+
+    // Map vertex position to face index
+    function positionKey(i) {
+      const x = Math.round(position.getX(i) * precision);
+      const y = Math.round(position.getY(i) * precision);
+      const z = Math.round(position.getZ(i) * precision);
+      return `${x}_${y}_${z}`;
+    }
+
+    // Build edge map for adjacency
+    for (let f = 0; f < faceCount; f++) {
+      const i0 = f * 3, i1 = f * 3 + 1, i2 = f * 3 + 2;
+      const p0 = positionKey(i0), p1 = positionKey(i1), p2 = positionKey(i2);
+
+      // Three edges: (p0,p1), (p1,p2), (p2,p0)
+      const edges = [
+        [p0, p1].sort().join('_'),
+        [p1, p2].sort().join('_'),
+        [p2, p0].sort().join('_')
+      ];
+
+      edges.forEach(edge => {
+        if (!edgeMap.has(edge)) edgeMap.set(edge, []);
+        edgeMap.get(edge).push(f);
+      });
+    }
+
+    // Build adjacency from shared edges
+    for (let f = 0; f < faceCount; f++) {
+      adjacency.set(f, new Set());
+    }
+    edgeMap.forEach(faces => {
+      for (let i = 0; i < faces.length; i++) {
+        for (let j = i + 1; j < faces.length; j++) {
+          const f1 = faces[i], f2 = faces[j];
+          adjacency.get(f1).add(f2);
+          adjacency.get(f2).add(f1);
+        }
+      }
+    });
+
+    return adjacency;
+  }
+
+  function getFaceNormal(geometry, faceIndex) {
+    const position = geometry.getAttribute("position");
+    const i0 = faceIndex * 3, i1 = faceIndex * 3 + 1, i2 = faceIndex * 3 + 2;
+    const v0 = new THREE.Vector3(position.getX(i0), position.getY(i0), position.getZ(i0));
+    const v1 = new THREE.Vector3(position.getX(i1), position.getY(i1), position.getZ(i1));
+    const v2 = new THREE.Vector3(position.getX(i2), position.getY(i2), position.getZ(i2));
+    const e1 = v2.clone().sub(v0);
+    const e2 = v1.clone().sub(v0);
+    return e1.cross(e2).normalize();
+  }
+
+  function getFaceCentroid(geometry, faceIndex) {
+    const position = geometry.getAttribute("position");
+    const i0 = faceIndex * 3, i1 = faceIndex * 3 + 1, i2 = faceIndex * 3 + 2;
+    const centroid = new THREE.Vector3();
+    centroid.add(new THREE.Vector3(position.getX(i0), position.getY(i0), position.getZ(i0)));
+    centroid.add(new THREE.Vector3(position.getX(i1), position.getY(i1), position.getZ(i1)));
+    centroid.add(new THREE.Vector3(position.getX(i2), position.getY(i2), position.getZ(i2)));
+    centroid.divideScalar(3);
+    return centroid;
+  }
+
+  function selectFaceRegion(startFaceIdx, addToSelection) {
+    if (!faceAdjacency) return;
+    const startNormal = getFaceNormal(currentFillMesh.geometry, startFaceIdx);
+    const queue = [startFaceIdx];
+    const visited = new Set();
+    const NORMAL_THRESHOLD = 0.87; // ~30 degrees
+
+    if (!addToSelection) {
+      selectedFaceIndices.clear();
+    }
+
+    while (queue.length > 0) {
+      const faceIdx = queue.shift();
+      if (visited.has(faceIdx)) continue;
+      visited.add(faceIdx);
+
+      const faceNormal = getFaceNormal(currentFillMesh.geometry, faceIdx);
+      const dot = startNormal.dot(faceNormal);
+      if (dot > NORMAL_THRESHOLD) {
+        selectedFaceIndices.add(faceIdx);
+        const adjacent = faceAdjacency.get(faceIdx);
+        if (adjacent) {
+          adjacent.forEach(adjFace => {
+            if (!visited.has(adjFace)) queue.push(adjFace);
+          });
+        }
+      }
+    }
+
+    updateFaceHighlight();
+    updateTextureFaceCount();
+  }
+
+  function updateFaceHighlight() {
+    if (textureHighlightMesh) {
+      textureHighlightMesh.geometry.dispose();
+      textureHighlightMesh.material.dispose();
+      currentModelRoot.remove(textureHighlightMesh);
+      textureHighlightMesh = null;
+    }
+
+    if (selectedFaceIndices.size === 0) return;
+
+    const position = currentFillMesh.geometry.getAttribute("position");
+    const highlightPositions = [];
+    const highlightIndices = [];
+
+    selectedFaceIndices.forEach(faceIdx => {
+      const i0 = faceIdx * 3, i1 = faceIdx * 3 + 1, i2 = faceIdx * 3 + 2;
+      const baseIndex = highlightPositions.length / 3;
+
+      // Get vertices and face normal
+      const v0 = new THREE.Vector3(position.getX(i0), position.getY(i0), position.getZ(i0));
+      const v1 = new THREE.Vector3(position.getX(i1), position.getY(i1), position.getZ(i1));
+      const v2 = new THREE.Vector3(position.getX(i2), position.getY(i2), position.getZ(i2));
+      const faceNormal = getFaceNormal(currentFillMesh.geometry, faceIdx);
+
+      // Offset vertices along normal by 0.005mm to prevent z-fighting
+      const offset = 0.005;
+      highlightPositions.push(
+        v0.x + faceNormal.x * offset, v0.y + faceNormal.y * offset, v0.z + faceNormal.z * offset,
+        v1.x + faceNormal.x * offset, v1.y + faceNormal.y * offset, v1.z + faceNormal.z * offset,
+        v2.x + faceNormal.x * offset, v2.y + faceNormal.y * offset, v2.z + faceNormal.z * offset
+      );
+      highlightIndices.push(baseIndex, baseIndex + 1, baseIndex + 2);
+    });
+
+    const highlightGeom = new THREE.BufferGeometry();
+    highlightGeom.setAttribute("position", new THREE.Float32BufferAttribute(highlightPositions, 3));
+    highlightGeom.setIndex(highlightIndices);
+
+    const highlightMat = new THREE.MeshBasicMaterial({
+      color: 0x4499ff,
+      opacity: 0.45,
+      transparent: true,
+      depthTest: false,
+      side: THREE.DoubleSide
+    });
+
+    textureHighlightMesh = new THREE.Mesh(highlightGeom, highlightMat);
+    currentModelRoot.add(textureHighlightMesh);
+  }
+
+  function updateTextureFaceCount() {
+    textureFaceCount.textContent = `${selectedFaceIndices.size} face${selectedFaceIndices.size === 1 ? '' : 's'} selected`;
+  }
+
+  function bumpValue(x, z, scale) {
+    const u = ((x % scale) + scale) % scale / scale;
+    const v = ((z % scale) + scale) % scale / scale;
+    return Math.pow(Math.sin(Math.PI * u), 2) * Math.pow(Math.sin(Math.PI * v), 2);
+  }
+
+  function meshValue(x, z, cellSize, strandWidth) {
+    const u = (x + z) / cellSize;
+    const v = (x - z) / cellSize;
+    const bandU = Math.abs(((u % 1) + 1) % 1 - 0.5) * 2;
+    const bandV = Math.abs(((v % 1) + 1) % 1 - 0.5) * 2;
+    const fraction = strandWidth / cellSize;
+    const inU = bandU < fraction ? 1 : 0;
+    const inV = bandV < fraction ? 1 : 0;
+    return Math.max(inU, inV);
+  }
+
+  function applyTextureToGeometry() {
+    if (selectedFaceIndices.size === 0) {
+      setStatus("No faces selected for texture.");
+      return;
+    }
+
+    const isWeave = texturePresetSelect.value === "mesh";
+    const height = parseFloat(isWeave ? meshHeightInput.value : bumpHeightInput.value);
+    const scale = parseFloat(isWeave ? meshCellInput.value : bumpScaleInput.value);
+    const strandWidth = isWeave ? parseFloat(meshStrandInput.value) : 0;
+
+    // Backup baseGeometry for reset
+    preTextureBaseGeometry = baseGeometry.clone();
+
+    // Determine subdivision level needed
+    baseGeometry.computeBoundingBox();
+    const bounds = baseGeometry.boundingBox;
+    const avgDim = (bounds.max.x - bounds.min.x + bounds.max.z - bounds.min.z) / 2;
+    const baseTriCount = baseGeometry.index.count / 3;
+    const targetEdgeLen = scale / 4;
+    let subdivLevels = 0;
+    let currentEdgeLen = avgDim / Math.sqrt(baseTriCount);
+
+    while (currentEdgeLen > targetEdgeLen && subdivLevels < 4) {
+      if (baseTriCount * Math.pow(4, subdivLevels + 1) > MAX_TRIANGLES) break;
+      currentEdgeLen /= 2;
+      subdivLevels++;
+    }
+
+    // Subdivide baseGeometry
+    let subdivGeom = baseGeometry.clone();
+    for (let i = 0; i < subdivLevels; i++) {
+      const newGeom = subdivideIndexedGeometry(subdivGeom);
+      subdivGeom.dispose();
+      subdivGeom = newGeom;
+    }
+
+    // Convert to non-indexed for per-face processing
+    const nonIdxGeom = subdivGeom.toNonIndexed();
+    const position = nonIdxGeom.getAttribute("position");
+    const vertexCount = position.count;
+    const newPositionArray = position.array.slice();
+
+    // Collect all vertices from selected faces in original mesh
+    const selectedVertices = [];
+    const origPosition = currentFillMesh.geometry.getAttribute("position");
+    selectedFaceIndices.forEach(fIdx => {
+      const i0 = fIdx * 3, i1 = fIdx * 3 + 1, i2 = fIdx * 3 + 2;
+      selectedVertices.push(
+        new THREE.Vector3(origPosition.getX(i0), origPosition.getY(i0), origPosition.getZ(i0)),
+        new THREE.Vector3(origPosition.getX(i1), origPosition.getY(i1), origPosition.getZ(i1)),
+        new THREE.Vector3(origPosition.getX(i2), origPosition.getY(i2), origPosition.getZ(i2))
+      );
+    });
+
+    // Compute proximity threshold: avg edge length of original mesh * 1.5
+    const originalFaceArea = (bounds.max.x - bounds.min.x) * (bounds.max.z - bounds.min.z) / baseTriCount;
+    const proximityThreshold = Math.sqrt(originalFaceArea) * 1.5;
+
+    // Apply displacement to vertices in selected regions
+    let displacedCount = 0;
+
+    for (let v = 0; v < vertexCount; v++) {
+      const vx = newPositionArray[v * 3];
+      const vy = newPositionArray[v * 3 + 1];
+      const vz = newPositionArray[v * 3 + 2];
+      const currentPos = new THREE.Vector3(vx, vy, vz);
+
+      // Check if this vertex is close to any selected vertex
+      let isSelected = false;
+      for (const selVert of selectedVertices) {
+        if (currentPos.distanceTo(selVert) < proximityThreshold) {
+          isSelected = true;
+          break;
+        }
+      }
+
+      if (isSelected) {
+        const faceIdx = Math.floor(v / 3);
+        const normal = getFaceNormal(nonIdxGeom, faceIdx);
+        const dispValue = isWeave
+          ? meshValue(vx, vz, scale, strandWidth)
+          : bumpValue(vx, vz, scale);
+
+        const displacement = height * dispValue;
+        newPositionArray[v * 3] += normal.x * displacement;
+        newPositionArray[v * 3 + 1] += normal.y * displacement;
+        newPositionArray[v * 3 + 2] += normal.z * displacement;
+        displacedCount++;
+      }
+    }
+
+    // Apply the modified positions back
+    nonIdxGeom.setAttribute("position", new THREE.Float32BufferAttribute(newPositionArray, 3));
+    nonIdxGeom.computeVertexNormals();
+
+    // Re-index for baseGeometry
+    prepareBaseGeometry(nonIdxGeom);
+    subdivGeom.dispose();
+
+    selectedFaceIndices.clear();
+    faceAdjacency = null;
+    faceCentroids = null;
+    clearTextureSelection();
+
+    rebuildModelFromSettings();
+    textureResetBtn.disabled = false;
+    setStatus(`Texture applied to ${displacedCount} vertices.`);
+  }
+
+  function initTexturePanel() {
+    if (!currentFillMesh) return;
+    faceAdjacency = buildFaceAdjacency(currentFillMesh.geometry);
+    selectedFaceIndices.clear();
+    updateFaceHighlight();
+    updateTextureFaceCount();
+
+    // Add click handler for face selection
+    const onCanvasClick = (e) => {
+      if (!texturePanelVisible || !currentFillMesh) return;
+
+      const rect = renderer.domElement.getBoundingClientRect();
+      textureMouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+      textureMouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+
+      textureRaycaster.setFromCamera(textureMouse, camera);
+      const intersects = textureRaycaster.intersectObject(currentFillMesh);
+
+      if (intersects.length > 0) {
+        const intersection = intersects[0];
+        const faceIndex = Math.floor(intersection.point.length / 0.5); // approximate - use intersection.faceIndex if available
+
+        // Get faceIndex from the intersection
+        let actualFaceIdx = 0;
+        if (intersection.face && typeof intersection.face.a === 'number') {
+          // For indexed geometry, this would work - but we have non-indexed
+          // For non-indexed, estimate from intersection point
+          const pos = currentFillMesh.geometry.getAttribute("position");
+          let minDist = Infinity;
+          for (let f = 0; f < Math.floor(pos.count / 3); f++) {
+            const faceCenter = getFaceCentroid(currentFillMesh.geometry, f);
+            const dist = intersection.point.distanceTo(faceCenter);
+            if (dist < minDist) {
+              minDist = dist;
+              actualFaceIdx = f;
+            }
+          }
+        }
+
+        selectFaceRegion(actualFaceIdx, e.shiftKey);
+      } else if (!e.shiftKey) {
+        selectedFaceIndices.clear();
+        updateFaceHighlight();
+        updateTextureFaceCount();
+      }
+    };
+
+    renderer.domElement.addEventListener("click", onCanvasClick);
+    renderer.domElement._textureClickHandler = onCanvasClick;
+  }
+
+  function clearTextureSelection() {
+    if (renderer.domElement._textureClickHandler) {
+      renderer.domElement.removeEventListener("click", renderer.domElement._textureClickHandler);
+      delete renderer.domElement._textureClickHandler;
+    }
+    selectedFaceIndices.clear();
+    faceAdjacency = null;
+    if (textureHighlightMesh) {
+      textureHighlightMesh.geometry.dispose();
+      textureHighlightMesh.material.dispose();
+      if (currentModelRoot) currentModelRoot.remove(textureHighlightMesh);
+      textureHighlightMesh = null;
+    }
+    updateTextureFaceCount();
+  }
+
   // ── Mold generator event listeners ──────────────────────────────────
 
   if (moldToggleBtn && moldPanel) {
@@ -2694,6 +3087,70 @@ document.addEventListener("DOMContentLoaded", () => {
     rebuildModelFromSettings();
   });
 
+  // ── Texture panel event listeners ──────────────────────────────────
+
+  if (textureToggleBtn && texturePanel) {
+    textureToggleBtn.addEventListener("click", () => {
+      if (!currentFillMesh) return;
+      texturePanelVisible = !texturePanelVisible;
+      texturePanel.style.display = texturePanelVisible ? "" : "none";
+      textureToggleBtn.setAttribute("aria-pressed", String(texturePanelVisible));
+      textureToggleBtn.classList.toggle("is-active", texturePanelVisible);
+      if (texturePanelVisible) {
+        initTexturePanel();
+      } else {
+        clearTextureSelection();
+      }
+    });
+  }
+
+  if (texturePresetSelect) {
+    texturePresetSelect.addEventListener("change", () => {
+      const isMesh = texturePresetSelect.value === "mesh";
+      textureBumpsControls.style.display = isMesh ? "none" : "";
+      textureMeshControls.style.display = isMesh ? "" : "none";
+    });
+  }
+
+  if (textureClearSelBtn) {
+    textureClearSelBtn.addEventListener("click", () => {
+      selectedFaceIndices.clear();
+      updateFaceHighlight();
+      updateTextureFaceCount();
+    });
+  }
+
+  if (textureSelectAllBtn) {
+    textureSelectAllBtn.addEventListener("click", () => {
+      if (!currentFillMesh) return;
+      const faceCount = Math.floor(currentFillMesh.geometry.getAttribute("position").count / 3);
+      for (let i = 0; i < faceCount; i++) {
+        selectedFaceIndices.add(i);
+      }
+      updateFaceHighlight();
+      updateTextureFaceCount();
+    });
+  }
+
+  if (textureApplyBtn) {
+    textureApplyBtn.addEventListener("click", () => {
+      applyTextureToGeometry();
+    });
+  }
+
+  if (textureResetBtn) {
+    textureResetBtn.addEventListener("click", () => {
+      if (preTextureBaseGeometry) {
+        baseGeometry.dispose();
+        baseGeometry = preTextureBaseGeometry.clone();
+        preTextureBaseGeometry = null;
+        textureResetBtn.disabled = true;
+        rebuildModelFromSettings();
+        setStatus("Texture reset to original geometry.");
+      }
+    });
+  }
+
   resetCameraButton.addEventListener("click", () => {
     if (currentBounds) {
       resetCameraToBounds();
@@ -2728,4 +3185,194 @@ document.addEventListener("DOMContentLoaded", () => {
   resetToDefaultView();
   resizeRenderer();
   animate();
+
+  // ============================================================================
+  // TRAIN DETECTION PANEL — Home Assistant Integration
+  // ============================================================================
+
+  const TRAIN_DETECTION_CONFIG = {
+    ha_base_url: localStorage.getItem('haBaseUrl') || 'http://homeassistant.local:8123',
+    ha_token: localStorage.getItem('haToken') || '',
+    update_interval: 10000, // 10 seconds
+    entities: {
+      train_detected: 'binary_sensor.train_detected',
+      sound_level: 'sensor.train_detector_sound_level',
+    }
+  };
+
+  let trainDetectionState = {
+    last_detection: null,
+    was_detecting: false,
+    detection_events: [],
+  };
+
+  // Initialize train detection UI elements
+  const detectionStatus = document.getElementById('detectionStatus');
+  const soundLevelMeter = document.getElementById('soundLevelMeter');
+  const soundLevelValue = document.getElementById('soundLevelValue');
+  const meterNote = document.getElementById('meterNote');
+  const eventLogTable = document.getElementById('eventLogTable');
+  const eventLogBody = document.getElementById('eventLogBody');
+  const logStatus = document.getElementById('logStatus');
+  const trainDetectionReload = document.getElementById('trainDetectionReload');
+
+  /**
+   * Fetch Home Assistant entity state
+   */
+  async function fetchHaEntityState(entityId) {
+    if (!TRAIN_DETECTION_CONFIG.ha_token) {
+      meterNote.textContent = 'HA token not set. Open console to configure.';
+      return null;
+    }
+
+    try {
+      const response = await fetch(
+        `${TRAIN_DETECTION_CONFIG.ha_base_url}/api/states/${entityId}`,
+        {
+          headers: {
+            'Authorization': `Bearer ${TRAIN_DETECTION_CONFIG.ha_token}`,
+            'Content-Type': 'application/json',
+          },
+        }
+      );
+
+      if (!response.ok) {
+        if (response.status === 401) {
+          meterNote.textContent = 'HA authentication failed. Check token.';
+        } else {
+          meterNote.textContent = `HA error: ${response.status}`;
+        }
+        return null;
+      }
+
+      return await response.json();
+    } catch (error) {
+      console.error(`Error fetching ${entityId}:`, error);
+      meterNote.textContent = 'Failed to connect to Home Assistant';
+      return null;
+    }
+  }
+
+  /**
+   * Update train detection display
+   */
+  async function updateTrainDetectionStatus() {
+    const trainDetected = await fetchHaEntityState(TRAIN_DETECTION_CONFIG.entities.train_detected);
+    const soundLevel = await fetchHaEntityState(TRAIN_DETECTION_CONFIG.entities.sound_level);
+
+    if (!trainDetected || !soundLevel) {
+      // HA not connected or entity not found
+      if (meterNote.textContent === 'Connecting to Home Assistant...' ||
+          !meterNote.textContent.includes('failed')) {
+        meterNote.textContent = 'No HA connection. Configure via console: setHaConfig(url, token)';
+      }
+      return;
+    }
+
+    // Update sound level
+    const level = parseFloat(soundLevel.state) || 0;
+    soundLevelMeter.value = Math.min(100, level * 100);
+    soundLevelValue.textContent = `${Math.round(level * 100)}%`;
+    meterNote.textContent = `Last update: ${new Date().toLocaleTimeString()}`;
+
+    // Update detection status
+    const isDetecting = trainDetected.state === 'on';
+    const statusElement = detectionStatus.querySelector('.status-indicator');
+
+    if (isDetecting) {
+      statusElement.className = 'status-indicator status-detecting';
+      detectionStatus.querySelector('.status-text').textContent = 'Train Passing';
+      detectionStatus.querySelector('.status-detail').textContent =
+        `Sound level: ${(level * 100).toFixed(1)}% — Fan at 80%`;
+
+      // Log detection event start
+      if (!trainDetectionState.was_detecting) {
+        const now = new Date();
+        trainDetectionState.last_detection = {
+          start_time: now,
+          peak_level: level,
+        };
+        trainDetectionState.was_detecting = true;
+      } else if (trainDetectionState.last_detection) {
+        // Update peak level
+        trainDetectionState.last_detection.peak_level = Math.max(
+          trainDetectionState.last_detection.peak_level,
+          level
+        );
+      }
+    } else {
+      statusElement.className = 'status-indicator status-clear';
+      detectionStatus.querySelector('.status-text').textContent = 'Clear';
+      detectionStatus.querySelector('.status-detail').textContent =
+        'No train detected — Normal airflow';
+
+      // Log detection event end
+      if (trainDetectionState.was_detecting && trainDetectionState.last_detection) {
+        const event = {
+          start_time: trainDetectionState.last_detection.start_time,
+          end_time: new Date(),
+          peak_level: trainDetectionState.last_detection.peak_level,
+        };
+        trainDetectionState.detection_events.unshift(event);
+        trainDetectionState.was_detecting = false;
+
+        // Keep only last 100 events
+        if (trainDetectionState.detection_events.length > 100) {
+          trainDetectionState.detection_events.pop();
+        }
+
+        updateEventLog();
+      }
+    }
+  }
+
+  /**
+   * Update event log table
+   */
+  function updateEventLog() {
+    logStatus.textContent = `${trainDetectionState.detection_events.length} event(s) recorded`;
+
+    if (trainDetectionState.detection_events.length === 0) {
+      eventLogBody.innerHTML = '<tr class="no-events"><td colspan="4">No events recorded yet</td></tr>';
+      return;
+    }
+
+    eventLogBody.innerHTML = trainDetectionState.detection_events
+      .map(event => {
+        const startTime = new Date(event.start_time);
+        const endTime = new Date(event.end_time);
+        const duration = Math.round((endTime - startTime) / 1000); // seconds
+        const peakLevel = (event.peak_level * 100).toFixed(1);
+
+        return `<tr>
+          <td>${startTime.toLocaleTimeString()}</td>
+          <td>${duration}s</td>
+          <td>${peakLevel}%</td>
+          <td>80% fan speed</td>
+        </tr>`;
+      })
+      .join('');
+  }
+
+  /**
+   * Global function to set HA configuration
+   * Usage in console: setHaConfig('http://homeassistant.local:8123', 'eyJ0...')
+   */
+  window.setHaConfig = function(baseUrl, token) {
+    TRAIN_DETECTION_CONFIG.ha_base_url = baseUrl;
+    TRAIN_DETECTION_CONFIG.ha_token = token;
+    localStorage.setItem('haBaseUrl', baseUrl);
+    localStorage.setItem('haToken', token);
+    meterNote.textContent = 'Configuration updated. Reloading...';
+    setTimeout(updateTrainDetectionStatus, 500);
+  };
+
+  // Reload button
+  if (trainDetectionReload) {
+    trainDetectionReload.addEventListener('click', updateTrainDetectionStatus);
+  }
+
+  // Start periodic updates
+  updateTrainDetectionStatus();
+  setInterval(updateTrainDetectionStatus, TRAIN_DETECTION_CONFIG.update_interval);
 });

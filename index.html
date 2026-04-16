@@ -181,6 +181,13 @@
             <line x1="12" y1="4" x2="12" y2="20" stroke-width="1" opacity="0.4"/>
           </svg>
         </button>
+        <button id="textureToggleBtn" class="canvas-overlay-btn" title="Toggle surface texture" type="button" disabled aria-pressed="false">
+          <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" width="22" height="22" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="8" stroke="currentColor" stroke-width="1.5" fill="none"/>
+            <circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="1" fill="currentColor" opacity="0.3"/>
+            <path d="M12 5 L12 3 M12 21 L12 19 M19 12 L21 12 M3 12 L5 12" stroke="currentColor" stroke-width="1.5" opacity="0.5"/>
+          </svg>
+        </button>
       </div>
     </div>
 
@@ -302,6 +309,37 @@
       </div>
     </div>
 
+    <div class="viewer-transform-row texture-panel" id="texturePanel" style="display:none;">
+      <div class="texture-header">
+        <span>Surface Texture</span>
+        <span id="textureFaceCount" class="texture-status">0 faces selected</span>
+      </div>
+      <div class="texture-buttons">
+        <button id="textureClearSelBtn" class="model-tool-btn" type="button">Clear</button>
+        <button id="textureSelectAllBtn" class="model-tool-btn" type="button">All</button>
+      </div>
+      <div class="texture-preset-group">
+        <label for="texturePresetSelect">Preset</label>
+        <select id="texturePresetSelect">
+          <option value="bumps">Bumps</option>
+          <option value="mesh">Mesh Weave</option>
+        </select>
+      </div>
+      <div id="textureBumpsControls" class="texture-controls-group">
+        <label for="bumpHeightInput">Height <input id="bumpHeightInput" class="dim-input" type="number" value="0.30" step="0.05" min="0.05" max="5.0"> mm</label>
+        <label for="bumpScaleInput">Scale  <input id="bumpScaleInput"  class="dim-input" type="number" value="2.00" step="0.25" min="0.25" max="20"> mm</label>
+      </div>
+      <div id="textureMeshControls" class="texture-controls-group" style="display:none;">
+        <label for="meshHeightInput">Height       <input id="meshHeightInput"  class="dim-input" type="number" value="0.30" step="0.05" min="0.05" max="5.0"> mm</label>
+        <label for="meshCellInput">Cell size    <input id="meshCellInput"    class="dim-input" type="number" value="2.00" step="0.25" min="0.25" max="20"> mm</label>
+        <label for="meshStrandInput">Strand width <input id="meshStrandInput"  class="dim-input" type="number" value="0.50" step="0.05" min="0.10" max="5.0"> mm</label>
+      </div>
+      <div class="texture-action-buttons">
+        <button id="textureApplyBtn" class="model-tool-btn" type="button">Apply Texture</button>
+        <button id="textureResetBtn" class="model-tool-btn" type="button" disabled>Reset</button>
+      </div>
+    </div>
+
     <section class="refinement-panel" aria-label="Triangle refinement control">
       <label for="refinementSlider">Triangle Multiplier</label>
       <input id="refinementSlider" type="range" min="0.10" max="16.00" step="0.10" value="1.00">
@@ -360,9 +398,70 @@
     </div>
 
     <div id="tab-train-spotting" class="tab-pane" role="tabpanel">
-      <div class="tab-placeholder">
-        <p class="tab-placeholder-title">Train Spotting</p>
-        <p class="tab-placeholder-body">Real-time logging and mapping of train activity — coming soon.</p>
+      <div class="viewer-header">
+        <div>
+          <p class="eyebrow">AC Infinity Integration</p>
+          <h2>Train Detection</h2>
+        </div>
+        <button id="trainDetectionReload" type="button">Reload Data</button>
+      </div>
+
+      <!-- Live Status Indicator -->
+      <div class="train-detection-container">
+        <div class="detection-status" id="detectionStatus">
+          <div class="status-indicator status-clear">
+            <span class="status-dot"></span>
+            <span class="status-text">Clear</span>
+          </div>
+          <p class="status-detail">No train detected</p>
+        </div>
+
+        <!-- Sound Level Meter -->
+        <div class="sound-meter">
+          <label for="soundLevelMeter">Current Sound Level</label>
+          <div class="meter-container">
+            <progress id="soundLevelMeter" class="sound-level-bar" value="0" max="100"></progress>
+            <span id="soundLevelValue" class="meter-value">0%</span>
+          </div>
+          <p class="meter-note" id="meterNote">Connecting to Home Assistant...</p>
+        </div>
+
+        <!-- Event Log Table -->
+        <div class="event-log">
+          <h3>Recent Detection Events</h3>
+          <div class="log-controls">
+            <p id="logStatus">Loading...</p>
+          </div>
+          <table class="log-table" id="eventLogTable">
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Duration</th>
+                <th>Peak Level</th>
+                <th>Fan Action</th>
+              </tr>
+            </thead>
+            <tbody id="eventLogBody">
+              <tr class="no-events">
+                <td colspan="4">No events recorded yet</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- API Configuration Info -->
+        <div class="api-config-info">
+          <details>
+            <summary>Configuration & Troubleshooting</summary>
+            <div class="config-content">
+              <p><strong>Required:</strong> Home Assistant running with ESPHome add-on and train-detector device configured.</p>
+              <p><strong>ESPHome Device:</strong> <code>train-detector</code></p>
+              <p><strong>Binary Sensor:</strong> <code>binary_sensor.train_detected</code></p>
+              <p><strong>Sound Level:</strong> <code>sensor.train_detector_sound_level</code></p>
+              <p><strong>Note:</strong> Data updates every 10 seconds. Check browser console for API errors.</p>
+            </div>
+          </details>
+        </div>
       </div>
     </div>
   </section>

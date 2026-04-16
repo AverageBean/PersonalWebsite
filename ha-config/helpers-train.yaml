@@ -1,0 +1,38 @@
+# Home Assistant Helpers for Train Detection
+#
+# These helpers are used by the train detection automations to:
+# - Store the pre-train fan speed for restoration after the event
+# - Provide a tunable detection threshold (also in ESPHome)
+#
+# Install by:
+# 1. Copying this file content into Home Assistant's configuration.yaml
+#    under the "input_number:" section
+# 2. Or create via UI: Settings → Devices & Services → Helpers
+# 3. Restart Home Assistant or reload helpers
+
+input_number:
+  # Stores the AC Infinity fan percentage before a train is detected
+  # Used by automations-train.yaml to restore the fan speed after the event
+  acinfinity_saved_speed:
+    name: "AC Infinity Saved Speed"
+    description: "Pre-train fan percentage; restored after detection ends"
+    unit_of_measurement: "%"
+    min: 0
+    max: 100
+    step: 1
+    mode: slider
+    restore: yes
+    initial_value: 30
+
+  # Optional: Threshold tuning in Home Assistant (mirrors ESPHome config)
+  # Modify this to adjust detection sensitivity without reflashing ESP32
+  train_detection_threshold:
+    name: "Train Detection Threshold"
+    description: "Sound level threshold (%) for triggering train detection"
+    unit_of_measurement: "%"
+    min: 20
+    max: 95
+    step: 1
+    mode: slider
+    restore: yes
+    initial_value: 65

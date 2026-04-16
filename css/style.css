@@ -849,6 +849,307 @@ body {
   display: none;
 }
 
+/* Train Detection Panel Styles */
+.train-detection-container {
+  display: flex;
+  flex-direction: column;
+  gap: 2rem;
+  padding: 1.6rem 0;
+}
+
+.detection-status {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.8rem;
+  padding: 2rem;
+  border-radius: 16px;
+  background: linear-gradient(135deg, rgba(15, 110, 140, 0.08), rgba(31, 52, 78, 0.04));
+  border: 1px solid var(--border);
+}
+
+.status-indicator {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  font-size: 1.5rem;
+  font-weight: 600;
+}
+
+.status-dot {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  animation: pulse 2s infinite;
+}
+
+.status-indicator.status-clear .status-dot {
+  background: #22c55e;
+  animation: none;
+}
+
+.status-indicator.status-detecting .status-dot {
+  background: #ef4444;
+  animation: pulse 0.8s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+.status-detail {
+  margin: 0;
+  color: var(--text-soft);
+  font-size: 0.95rem;
+}
+
+/* Sound Level Meter */
+.sound-meter {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.sound-meter label {
+  font-weight: 500;
+  color: var(--text-main);
+}
+
+.meter-container {
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+}
+
+.sound-level-bar {
+  flex: 1;
+  height: 24px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: linear-gradient(90deg, rgba(34, 197, 94, 0.2), rgba(239, 68, 68, 0.2));
+  -webkit-appearance: none;
+  appearance: none;
+  overflow: hidden;
+}
+
+.sound-level-bar::-webkit-progress-bar {
+  background: linear-gradient(90deg, rgba(34, 197, 94, 0.2), rgba(239, 68, 68, 0.2));
+  border-radius: 12px;
+}
+
+.sound-level-bar::-webkit-progress-value {
+  background: linear-gradient(90deg, #22c55e 0%, #eab308 50%, #ef4444 100%);
+  border-radius: 12px;
+}
+
+.sound-level-bar::-moz-progress-bar {
+  background: linear-gradient(90deg, #22c55e 0%, #eab308 50%, #ef4444 100%);
+  border-radius: 12px;
+}
+
+.meter-value {
+  min-width: 60px;
+  text-align: right;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.meter-note {
+  margin: 0.4rem 0 0 0;
+  font-size: 0.85rem;
+  color: var(--text-soft);
+}
+
+/* Event Log */
+.event-log {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.event-log h3 {
+  margin: 0;
+  font-size: 1.1rem;
+  color: var(--text-main);
+}
+
+.log-controls {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+#logStatus {
+  margin: 0;
+  font-size: 0.9rem;
+  color: var(--text-soft);
+}
+
+.log-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+.log-table thead {
+  background: rgba(15, 110, 140, 0.06);
+  border-bottom: 2px solid var(--border);
+}
+
+.log-table th {
+  padding: 0.8rem;
+  text-align: left;
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+.log-table td {
+  padding: 0.8rem;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-soft);
+}
+
+.log-table tbody tr:hover {
+  background: rgba(15, 110, 140, 0.03);
+}
+
+.log-table .no-events {
+  text-align: center;
+  color: var(--text-soft);
+  font-style: italic;
+}
+
+/* API Configuration Info */
+.api-config-info {
+  padding: 1.2rem;
+  background: rgba(15, 110, 140, 0.04);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+
+.api-config-info summary {
+  cursor: pointer;
+  font-weight: 500;
+  color: var(--accent);
+  padding: 0.4rem 0;
+}
+
+.api-config-info summary:hover {
+  color: var(--accent-hover);
+}
+
+.config-content {
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  font-size: 0.9rem;
+}
+
+.config-content p {
+  margin: 0;
+  color: var(--text-soft);
+}
+
+.config-content code {
+  background: rgba(15, 110, 140, 0.1);
+  padding: 0.2rem 0.4rem;
+  border-radius: 4px;
+  font-family: "Courier New", monospace;
+  color: var(--accent);
+  font-size: 0.85em;
+}
+
+/* ── Surface texture panel ──────────────────────────────────────────── */
+
+.texture-panel {
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.5rem 0.6rem;
+}
+
+.texture-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+.texture-status {
+  color: var(--text-soft);
+  font-size: 0.73rem;
+  font-weight: 500;
+}
+
+.texture-buttons {
+  display: flex;
+  gap: 0.35rem;
+}
+
+.texture-buttons .model-tool-btn {
+  flex: 1;
+  padding: 0.3rem 0.5rem;
+  font-size: 0.73rem;
+}
+
+.texture-preset-group {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.texture-preset-group label {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text-main);
+  white-space: nowrap;
+}
+
+.texture-preset-group select {
+  flex: 1;
+  padding: 0.25rem 0.35rem;
+  font-size: 0.73rem;
+}
+
+.texture-controls-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.texture-controls-group label {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.73rem;
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+.texture-controls-group .dim-input {
+  width: 3.2rem;
+  padding: 0.25rem 0.35rem;
+  font-size: 0.73rem;
+}
+
+.texture-action-buttons {
+  display: flex;
+  gap: 0.35rem;
+  margin-top: 0.2rem;
+}
+
+.texture-action-buttons .model-tool-btn {
+  flex: 1;
+  padding: 0.35rem 0.5rem;
+  font-size: 0.73rem;
+}
+
 @media (max-width: 1080px) {
   body {
     padding: 1rem;

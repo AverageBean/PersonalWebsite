@@ -2833,50 +2833,64 @@ document.addEventListener("DOMContentLoaded", () => {
     const uAxis = new THREE.Vector3().crossVectors(arbitrary, avgNormal).normalize();
     const vAxis = new THREE.Vector3().crossVectors(avgNormal, uAxis);
 
-    // Project centroids to UV space
-    const uvPoints = [];
+    // Project centroids and face bounds to UV space for occupancy mapping
     let uMin = Infinity, uMax = -Infinity, vMin = Infinity, vMax = -Infinity;
-    selectedCentroids.forEach(c => {
+    const selectedRegions = []; // Store UV bounds of each selected face
+
+    selectedCentroids.forEach((c, idx) => {
       const u = c.dot(uAxis);
       const v = c.dot(vAxis);
-      uvPoints.push({ u, v, cent: c });
       uMin = Math.min(uMin, u);
       uMax = Math.max(uMax, u);
       vMin = Math.min(vMin, v);
       vMax = Math.max(vMax, v);
+      selectedRegions.push({ u, v, normal: selectedNormals[idx], cent: c });
     });
 
-    // Generate bump grid
-    const bumpCenters = [];
-    const usedUV = new Set();
+    // Create occupancy map: mark which UV cells contain selected faces
+    const cellSize = spacing / 2; // Fine granularity for occupancy
+    const uGridMin = Math.floor(uMin / cellSize) * cellSize;
+    const vGridMin = Math.floor(vMin / cellSize) * cellSize;
+    const occupancy = new Map(); // key: "gridU_gridV" -> true if any selected face covers it
 
+    selectedRegions.forEach(region => {
+      const uGrid = Math.round(region.u / cellSize);
+      const vGrid = Math.round(region.v / cellSize);
+      // Mark this and neighboring cells as occupied
+      for (let du = -1; du <= 1; du++) {
+        for (let dv = -1; dv <= 1; dv++) {
+          const key = `${uGrid + du}_${vGrid + dv}`;
+          occupancy.set(key, true);
+        }
+      }
+    });
+
+    // Generate bump grid at regular intervals, only in occupied regions
+    const bumpCenters = [];
     for (let gu = Math.ceil(uMin / spacing) * spacing; gu <= uMax; gu += spacing) {
       for (let gv = Math.ceil(vMin / spacing) * spacing; gv <= vMax; gv += spacing) {
-        // Find nearest selected centroid
-        let nearest = null;
-        let minDist = Infinity;
-        let nearestIdx = -1;
+        // Check if this grid point is in an occupied region
+        const uGrid = Math.round(gu / cellSize);
+        const vGrid = Math.round(gv / cellSize);
+        const key = `${uGrid}_${vGrid}`;
 
-        for (let i = 0; i < uvPoints.length; i++) {
-          const uv = uvPoints[i];
-          const dist = Math.hypot(gu - uv.u, gv - uv.v);
-          if (dist < minDist) {
-            minDist = dist;
-            nearest = uv;
-            nearestIdx = i;
-          }
-        }
+        if (occupancy.has(key)) {
+          // Find the nearest selected region's normal and center
+          let nearest = selectedRegions[0];
+          let minDist = Infinity;
 
-        // Accept if within 70% of spacing
-        if (nearest && minDist < spacing * 0.7) {
-          const key = `${Math.round(gu / spacing)}_${Math.round(gv / spacing)}`;
-          if (!usedUV.has(key)) {
-            usedUV.add(key);
-            bumpCenters.push({
-              position: nearest.cent,
-              normal: selectedNormals[nearestIdx]
-            });
+          for (const region of selectedRegions) {
+            const dist = Math.hypot(gu - region.u, gv - region.v);
+            if (dist < minDist) {
+              minDist = dist;
+              nearest = region;
+            }
           }
+
+          bumpCenters.push({
+            position: nearest.cent,
+            normal: nearest.normal
+          });
         }
       }
     }

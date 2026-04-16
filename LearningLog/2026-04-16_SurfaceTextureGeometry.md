@@ -170,6 +170,33 @@ Users can reduce spacing for finer detail (within budget) or increase for coarse
 - Matches user mental model (texture applied to "flat" surface)
 - Alternative: implement per-face bump placement with more complex grid logic
 
+## Major Refactor: Procedural vs Geometric Bumps
+
+### Why Geometry Approach Failed
+The original implementation placed individual THREE.SphereGeometry hemispheres on a regular grid:
+- **Estimation wildly inaccurate**: User reported 1mm spacing showed 1428 estimated bumps but only 7-9 rendered
+- **Chaotic zigzag patterns**: Bumps appeared in unpredictable scattered arrangements, not uniform grid
+- **Grid misalignment**: UV-projected grid didn't align with actual face boundaries
+- **Poor performance**: Processing thousands of small geometries froze the browser
+- **Unreliable on complex meshes**: Perforated faces and varying mesh density broke placement logic
+
+### Why Procedural Approach Works
+Instead of placing geometry, apply a **mathematical repeating pattern** via vertex displacement:
+- **Predictable**: Pattern is purely mathematical → guaranteed uniform spacing
+- **Efficient**: Scales with mesh resolution, not bump count (65K vertices vs 1K geometries)
+- **Adaptive**: Subdivide mesh fine enough, apply pattern to every selected vertex
+- **Universal**: Works on any surface (flat, curved, perforated, complex)
+- **Reliable**: No grid alignment issues, no estimation errors
+
+### Implementation
+```
+For each vertex in selected faces:
+  - Position within repeating cell: (vx % spacing, vz % spacing)
+  - Normalize to [0,1]: cellU/spacing, cellV/spacing
+  - Compute bump value: smooth cosine function centered at (0.5, 0.5)
+  - Displace along face normal by: radius * bumpValue
+```
+
 ## Commits
 
 - **dd781c8**: Implement surface texture via true 3D geometry (hemispherical bumps)
@@ -202,3 +229,10 @@ Users can reduce spacing for finer detail (within budget) or increase for coarse
   - Estimate from bounding box area with 50% coverage factor (realistic)
   - Reject if limit exceeded, suggest spacing to user (e.g., "try ≥5mm")
   - Preserves performance while giving actionable feedback
+
+- **bf1bc5f**: Overhaul bump generation: switch to procedural repeating pattern
+  - Problem: Geometric grid placement had chaotic patterns, massive estimation errors
+  - Solution: Apply mathematical repeating pattern via vertex displacement
+  - Subdivide mesh adaptively to spacing/3 edge length
+  - For each vertex: apply smooth cosine bump centered in repeating cell
+  - Result: Truly uniform spacing, predictable, efficient, works on any mesh

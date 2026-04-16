@@ -2804,22 +2804,22 @@ document.addEventListener("DOMContentLoaded", () => {
       return false;
     }
 
-    // Collect selected face data
+    // Collect selected face data with index mapping
     const position = currentFillMesh.geometry.getAttribute('position');
-    const selectedCentroids = [];
-    const selectedNormals = [];
+    const faceNormalMap = new Map(); // Map from face index to normal
+    const faceCentroidMap = new Map(); // Map from face index to centroid
 
     selectedFaceIndices.forEach(fIdx => {
       const centroid = getFaceCentroid(currentFillMesh.geometry, fIdx);
       const normal = getFaceNormal(currentFillMesh.geometry, fIdx);
-      selectedCentroids.push(centroid);
-      selectedNormals.push(normal);
+      faceNormalMap.set(fIdx, normal);
+      faceCentroidMap.set(fIdx, centroid);
     });
 
     // Compute weighted average normal (area-weighted)
     const avgNormal = new THREE.Vector3(0, 0, 0);
-    selectedCentroids.forEach((c, i) => {
-      avgNormal.add(selectedNormals[i]);
+    selectedFaceIndices.forEach(fIdx => {
+      avgNormal.add(faceNormalMap.get(fIdx));
     });
     avgNormal.normalize();
 
@@ -2833,63 +2833,58 @@ document.addEventListener("DOMContentLoaded", () => {
     const uAxis = new THREE.Vector3().crossVectors(arbitrary, avgNormal).normalize();
     const vAxis = new THREE.Vector3().crossVectors(avgNormal, uAxis);
 
-    // Project centroids and face bounds to UV space for occupancy mapping
+    // Collect all vertices of selected faces to compute UV bounds per face
     let uMin = Infinity, uMax = -Infinity, vMin = Infinity, vMax = -Infinity;
-    const selectedRegions = []; // Store UV bounds of each selected face
+    const selectedFaceUVBounds = []; // Store min/max UV for each selected face
 
-    selectedCentroids.forEach((c, idx) => {
-      const u = c.dot(uAxis);
-      const v = c.dot(vAxis);
-      uMin = Math.min(uMin, u);
-      uMax = Math.max(uMax, u);
-      vMin = Math.min(vMin, v);
-      vMax = Math.max(vMax, v);
-      selectedRegions.push({ u, v, normal: selectedNormals[idx], cent: c });
+    selectedFaceIndices.forEach(fIdx => {
+      const i0 = fIdx * 3, i1 = fIdx * 3 + 1, i2 = fIdx * 3 + 2;
+      const v0 = new THREE.Vector3(position.getX(i0), position.getY(i0), position.getZ(i0));
+      const v1 = new THREE.Vector3(position.getX(i1), position.getY(i1), position.getZ(i1));
+      const v2 = new THREE.Vector3(position.getX(i2), position.getY(i2), position.getZ(i2));
+
+      const u0 = v0.dot(uAxis), v0uv = v0.dot(vAxis);
+      const u1 = v1.dot(uAxis), v1uv = v1.dot(vAxis);
+      const u2 = v2.dot(uAxis), v2uv = v2.dot(vAxis);
+
+      const faceUMin = Math.min(u0, u1, u2);
+      const faceUMax = Math.max(u0, u1, u2);
+      const faceVMin = Math.min(v0uv, v1uv, v2uv);
+      const faceVMax = Math.max(v0uv, v1uv, v2uv);
+
+      selectedFaceUVBounds.push({ uMin: faceUMin, uMax: faceUMax, vMin: faceVMin, vMax: faceVMax, idx: fIdx });
+
+      uMin = Math.min(uMin, faceUMin);
+      uMax = Math.max(uMax, faceUMax);
+      vMin = Math.min(vMin, faceVMin);
+      vMax = Math.max(vMax, faceVMax);
     });
 
-    // Create occupancy map: mark which UV cells contain selected faces
-    const cellSize = spacing / 2; // Fine granularity for occupancy
-    const uGridMin = Math.floor(uMin / cellSize) * cellSize;
-    const vGridMin = Math.floor(vMin / cellSize) * cellSize;
-    const occupancy = new Map(); // key: "gridU_gridV" -> true if any selected face covers it
-
-    selectedRegions.forEach(region => {
-      const uGrid = Math.round(region.u / cellSize);
-      const vGrid = Math.round(region.v / cellSize);
-      // Mark this and neighboring cells as occupied
-      for (let du = -1; du <= 1; du++) {
-        for (let dv = -1; dv <= 1; dv++) {
-          const key = `${uGrid + du}_${vGrid + dv}`;
-          occupancy.set(key, true);
-        }
-      }
-    });
-
-    // Generate bump grid at regular intervals, only in occupied regions
+    // Generate bump grid at regular intervals
+    // Only place bumps where grid point is within the UV bounds of a selected face
     const bumpCenters = [];
     for (let gu = Math.ceil(uMin / spacing) * spacing; gu <= uMax; gu += spacing) {
       for (let gv = Math.ceil(vMin / spacing) * spacing; gv <= vMax; gv += spacing) {
-        // Check if this grid point is in an occupied region
-        const uGrid = Math.round(gu / cellSize);
-        const vGrid = Math.round(gv / cellSize);
-        const key = `${uGrid}_${vGrid}`;
+        // Check if this grid point is within any selected face's UV bounds
+        let isInSelectedFace = false;
+        let coveringFaceIdx = -1;
 
-        if (occupancy.has(key)) {
-          // Find the nearest selected region's normal and center
-          let nearest = selectedRegions[0];
-          let minDist = Infinity;
-
-          for (const region of selectedRegions) {
-            const dist = Math.hypot(gu - region.u, gv - region.v);
-            if (dist < minDist) {
-              minDist = dist;
-              nearest = region;
-            }
+        for (const faceBounds of selectedFaceUVBounds) {
+          // Point is inside face if within all bounds with margin for numerical tolerance
+          const margin = (faceBounds.uMax - faceBounds.uMin) * 0.05;
+          if (gu >= faceBounds.uMin - margin && gu <= faceBounds.uMax + margin &&
+              gv >= faceBounds.vMin - margin && gv <= faceBounds.vMax + margin) {
+            isInSelectedFace = true;
+            coveringFaceIdx = faceBounds.idx;
+            break;
           }
+        }
 
+        if (isInSelectedFace && coveringFaceIdx >= 0) {
+          // Use the covering face's normal and centroid
           bumpCenters.push({
-            position: nearest.cent,
-            normal: nearest.normal
+            position: faceCentroidMap.get(coveringFaceIdx),
+            normal: faceNormalMap.get(coveringFaceIdx)
           });
         }
       }

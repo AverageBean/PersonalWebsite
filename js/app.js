@@ -2799,6 +2799,8 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   function addHemisphericBumps(spacing, radius) {
+    const MAX_BUMPS = 500; // Prevent excessive geometry that freezes the viewer
+
     if (!currentFillMesh || selectedFaceIndices.size === 0) {
       setStatus("No faces selected for bumps.");
       return false;
@@ -2815,6 +2817,33 @@ document.addEventListener("DOMContentLoaded", () => {
       faceNormalMap.set(fIdx, normal);
       faceCentroidMap.set(fIdx, centroid);
     });
+
+    // Pre-flight: estimate bump count based on bounding box
+    // Rough heuristic: grid density = (area / spacing^2), but only ~50% coverage in typical selection
+    let minU = Infinity, maxU = -Infinity, minV = Infinity, maxV = -Infinity;
+
+    // Compute UV bounding box
+    selectedFaceIndices.forEach(fIdx => {
+      const i0 = fIdx * 3, i1 = fIdx * 3 + 1, i2 = fIdx * 3 + 2;
+      const v0 = new THREE.Vector3(position.getX(i0), position.getY(i0), position.getZ(i0));
+      const v1 = new THREE.Vector3(position.getX(i1), position.getY(i1), position.getZ(i1));
+      const v2 = new THREE.Vector3(position.getX(i2), position.getY(i2), position.getZ(i2));
+
+      // Compute bounding box in world space (rough estimate, not full UV projection yet)
+      minU = Math.min(minU, v0.x, v1.x, v2.x);
+      maxU = Math.max(maxU, v0.x, v1.x, v2.x);
+      minV = Math.min(minV, v0.z, v1.z, v2.z);
+      maxV = Math.max(maxV, v0.z, v1.z, v2.z);
+    });
+
+    const uvArea = (maxU - minU) * (maxV - minV);
+    const estimatedBumps = Math.ceil((uvArea / (spacing * spacing)) * 0.5); // 50% coverage factor
+
+    if (estimatedBumps > MAX_BUMPS) {
+      const suggestedSpacing = spacing * Math.sqrt(estimatedBumps / MAX_BUMPS);
+      setStatus(`Too many bumps (${estimatedBumps}). Try spacing ≥${suggestedSpacing.toFixed(1)}mm or select fewer faces.`);
+      return false;
+    }
 
     // Compute weighted average normal (area-weighted)
     const avgNormal = new THREE.Vector3(0, 0, 0);

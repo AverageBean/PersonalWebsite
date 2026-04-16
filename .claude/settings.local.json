@@ -131,7 +131,9 @@
       "Bash(awk '{print $NF}')",
       "Bash(xargs -I {} taskkill /PID {} /F)",
       "Bash(powershell -Command 'Get-NetTCPConnection -LocalPort 8081 -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }')",
-      "Bash(npm test *)"
+      "Bash(npm test *)",
+      "Bash(tee /tmp/test_output.txt)",
+      "Bash(tee /tmp/test_run.log)"
     ]
   }
 }

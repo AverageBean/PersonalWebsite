@@ -161,17 +161,10 @@ test.describe('Surface Texture Tool', () => {
     // Wait for apply to complete
     await page.waitForTimeout(2000);
 
-    // Status should change to show vertices were displaced
+    // Status should change to show texture was applied
     const statusAfter = await page.locator('#statusText').textContent();
-    expect(statusAfter).toContain('Texture applied');
+    expect(statusAfter).toMatch(/Added.*hemispherical bumps|Texture applied to \d+ vertices/);
     expect(statusAfter).not.toEqual(statusBefore);
-
-    // Verify texture persists through reload by checking reset is available
-    const resetBtn = page.locator('#textureResetBtn');
-    const isDisabled = await resetBtn.isDisabled().catch(() => true);
-    // Reset button should be enabled if texture was applied, but might not be visible
-    // So we just verify the status message changed
-    expect(statusAfter).toMatch(/Texture applied to \d+ vertices/);
   });
 
   test('exported STL includes displaced geometry', async ({ page }) => {
@@ -197,7 +190,7 @@ test.describe('Surface Texture Tool', () => {
 
     // Verify texture was applied by checking status
     const statusAfter = await page.locator('#statusText').textContent();
-    expect(statusAfter).toContain('Texture applied');
+    expect(statusAfter).toMatch(/Added.*hemispherical bumps|Texture applied to \d+ vertices/);
 
     // Export button should still be enabled and ready for download
     const exportBtn = page.locator('#downloadExportButton');

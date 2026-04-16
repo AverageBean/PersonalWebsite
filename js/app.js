@@ -74,8 +74,8 @@ document.addEventListener("DOMContentLoaded", () => {
   const texturePresetSelect = document.getElementById("texturePresetSelect");
   const textureBumpsControls = document.getElementById("textureBumpsControls");
   const textureMeshControls = document.getElementById("textureMeshControls");
-  const bumpHeightInput = document.getElementById("bumpHeightInput");
-  const bumpScaleInput = document.getElementById("bumpScaleInput");
+  const bumpSpacingInput = document.getElementById("bumpSpacingInput");
+  const bumpRadiusInput = document.getElementById("bumpRadiusInput");
   const meshHeightInput = document.getElementById("meshHeightInput");
   const meshCellInput = document.getElementById("meshCellInput");
   const meshStrandInput = document.getElementById("meshStrandInput");
@@ -2777,6 +2777,168 @@ document.addEventListener("DOMContentLoaded", () => {
     textureFaceCount.textContent = `${selectedFaceIndices.size} face${selectedFaceIndices.size === 1 ? '' : 's'} selected`;
   }
 
+  function mergeGeometriesNonIndexed(baseGeom, bumpGeoms) {
+    const all = [baseGeom, ...bumpGeoms];
+    let totalVerts = 0;
+    for (const g of all) {
+      totalVerts += g.getAttribute('position').count;
+    }
+
+    const positions = new Float32Array(totalVerts * 3);
+    let offset = 0;
+    for (const g of all) {
+      const arr = g.getAttribute('position').array;
+      positions.set(arr, offset);
+      offset += arr.length;
+    }
+
+    const merged = new THREE.BufferGeometry();
+    merged.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    merged.computeVertexNormals();
+    return merged;
+  }
+
+  function addHemisphericBumps(spacing, radius) {
+    if (!currentFillMesh || selectedFaceIndices.size === 0) {
+      setStatus("No faces selected for bumps.");
+      return false;
+    }
+
+    // Collect selected face data
+    const position = currentFillMesh.geometry.getAttribute('position');
+    const selectedCentroids = [];
+    const selectedNormals = [];
+
+    selectedFaceIndices.forEach(fIdx => {
+      const centroid = getFaceCentroid(currentFillMesh.geometry, fIdx);
+      const normal = getFaceNormal(currentFillMesh.geometry, fIdx);
+      selectedCentroids.push(centroid);
+      selectedNormals.push(normal);
+    });
+
+    // Compute weighted average normal (area-weighted)
+    const avgNormal = new THREE.Vector3(0, 0, 0);
+    selectedCentroids.forEach((c, i) => {
+      avgNormal.add(selectedNormals[i]);
+    });
+    avgNormal.normalize();
+
+    // Build orthonormal frame (UV local coordinates)
+    const arbitrary = new THREE.Vector3();
+    if (Math.abs(avgNormal.y) < 0.9) {
+      arbitrary.set(0, 1, 0);
+    } else {
+      arbitrary.set(1, 0, 0);
+    }
+    const uAxis = new THREE.Vector3().crossVectors(arbitrary, avgNormal).normalize();
+    const vAxis = new THREE.Vector3().crossVectors(avgNormal, uAxis);
+
+    // Project centroids to UV space
+    const uvPoints = [];
+    let uMin = Infinity, uMax = -Infinity, vMin = Infinity, vMax = -Infinity;
+    selectedCentroids.forEach(c => {
+      const u = c.dot(uAxis);
+      const v = c.dot(vAxis);
+      uvPoints.push({ u, v, cent: c });
+      uMin = Math.min(uMin, u);
+      uMax = Math.max(uMax, u);
+      vMin = Math.min(vMin, v);
+      vMax = Math.max(vMax, v);
+    });
+
+    // Generate bump grid
+    const bumpCenters = [];
+    const usedUV = new Set();
+
+    for (let gu = Math.ceil(uMin / spacing) * spacing; gu <= uMax; gu += spacing) {
+      for (let gv = Math.ceil(vMin / spacing) * spacing; gv <= vMax; gv += spacing) {
+        // Find nearest selected centroid
+        let nearest = null;
+        let minDist = Infinity;
+        let nearestIdx = -1;
+
+        for (let i = 0; i < uvPoints.length; i++) {
+          const uv = uvPoints[i];
+          const dist = Math.hypot(gu - uv.u, gv - uv.v);
+          if (dist < minDist) {
+            minDist = dist;
+            nearest = uv;
+            nearestIdx = i;
+          }
+        }
+
+        // Accept if within 70% of spacing
+        if (nearest && minDist < spacing * 0.7) {
+          const key = `${Math.round(gu / spacing)}_${Math.round(gv / spacing)}`;
+          if (!usedUV.has(key)) {
+            usedUV.add(key);
+            bumpCenters.push({
+              position: nearest.cent,
+              normal: selectedNormals[nearestIdx]
+            });
+          }
+        }
+      }
+    }
+
+    if (bumpCenters.length === 0) {
+      setStatus("No bump positions found in selected region.");
+      return false;
+    }
+
+    // Create hemisphere geometries
+    const bumpGeometries = [];
+    for (const bump of bumpCenters) {
+      // Create hemisphere: quarter-sphere from 0 to π/2 theta
+      const hemisphereGeom = new THREE.SphereGeometry(radius, 12, 6, 0, Math.PI * 2, 0, Math.PI / 2);
+
+      // Orient to match surface normal (default hemisphere points +Y)
+      const quaternion = new THREE.Quaternion();
+      quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), bump.normal);
+      const rotMatrix = new THREE.Matrix4().makeRotationFromQuaternion(quaternion);
+      hemisphereGeom.applyMatrix4(rotMatrix);
+
+      // Position at bump center
+      hemisphereGeom.translate(bump.position.x, bump.position.y, bump.position.z);
+
+      // Convert to non-indexed for merging
+      const nonIndexedGeom = hemisphereGeom.toNonIndexed();
+      bumpGeometries.push(nonIndexedGeom);
+    }
+
+
+    // Merge base geometry with bumps
+    const baseNonIndexed = currentFillMesh.geometry.toNonIndexed();
+    const mergedGeom = mergeGeometriesNonIndexed(baseNonIndexed, bumpGeometries);
+
+
+    // Check triangle budget
+    const estimatedTris = mergedGeom.getAttribute('position').count / 3;
+    if (estimatedTris > MAX_TRIANGLES) {
+      setStatus(`Bump geometry would exceed ${MAX_TRIANGLES} triangles (${estimatedTris}). Reduce spacing or radius.`);
+      mergedGeom.dispose();
+      return false;
+    }
+
+    // Backup & update baseGeometry
+    preTextureBaseGeometry = baseGeometry.clone();
+    const preparedGeom = prepareBaseGeometry(mergedGeom);
+    if (preparedGeom !== mergedGeom) {
+      mergedGeom.dispose();
+    }
+    baseGeometry = preparedGeom;
+
+    // Cleanup & rebuild
+    selectedFaceIndices.clear();
+    faceAdjacency = null;
+    clearTextureSelection();
+
+    rebuildModelFromSettings();
+    textureResetBtn.disabled = false;
+    setStatus(`Added ${bumpCenters.length} hemispherical bumps.`);
+    return true;
+  }
+
   function bumpValue(x, z, scale) {
     const u = ((x % scale) + scale) % scale / scale;
     const v = ((z % scale) + scale) % scale / scale;
@@ -2794,17 +2956,7 @@ document.addEventListener("DOMContentLoaded", () => {
     return Math.max(inU, inV);
   }
 
-  function applyTextureToGeometry() {
-    if (selectedFaceIndices.size === 0) {
-      setStatus("No faces selected for texture.");
-      return;
-    }
-
-    const isWeave = texturePresetSelect.value === "mesh";
-    const height = parseFloat(isWeave ? meshHeightInput.value : bumpHeightInput.value);
-    const scale = parseFloat(isWeave ? meshCellInput.value : bumpScaleInput.value);
-    const strandWidth = isWeave ? parseFloat(meshStrandInput.value) : 0;
-
+  function applyMeshWeaveDisplacement(height, cellSize, strandWidth) {
     // Backup baseGeometry for reset
     preTextureBaseGeometry = baseGeometry.clone();
 
@@ -2813,7 +2965,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const bounds = baseGeometry.boundingBox;
     const avgDim = (bounds.max.x - bounds.min.x + bounds.max.z - bounds.min.z) / 2;
     const baseTriCount = baseGeometry.index.count / 3;
-    const targetEdgeLen = scale / 4;
+    const targetEdgeLen = cellSize / 4;
     let subdivLevels = 0;
     let currentEdgeLen = avgDim / Math.sqrt(baseTriCount);
 
@@ -2901,9 +3053,7 @@ document.addEventListener("DOMContentLoaded", () => {
       if (isSelected) {
         const faceIdx = Math.floor(v / 3);
         const normal = getFaceNormal(nonIdxGeom, faceIdx);
-        const dispValue = isWeave
-          ? meshValue(vx, vz, scale, strandWidth)
-          : bumpValue(vx, vz, scale);
+        const dispValue = meshValue(vx, vz, cellSize, strandWidth);
 
         const displacement = height * dispValue;
         newPositionArray[v * 3] += normal.x * displacement;
@@ -2925,14 +3075,37 @@ document.addEventListener("DOMContentLoaded", () => {
     baseGeometry = preparedGeom;
     subdivGeom.dispose();
 
-    selectedFaceIndices.clear();
-    faceAdjacency = null;
-    faceCentroids = null;
-    clearTextureSelection();
-
-    rebuildModelFromSettings();
-    textureResetBtn.disabled = false;
     setStatus(`Texture applied to ${displacedCount} vertices.`);
+  }
+
+  function applyTextureToGeometry() {
+    if (selectedFaceIndices.size === 0) {
+      setStatus("No faces selected for texture.");
+      return;
+    }
+
+    const preset = texturePresetSelect.value;
+
+    if (preset === "bumps") {
+      const spacing = parseFloat(bumpSpacingInput.value);
+      const radius = parseFloat(bumpRadiusInput.value);
+      addHemisphericBumps(spacing, radius);
+    } else if (preset === "mesh") {
+      const height = parseFloat(meshHeightInput.value);
+      const cellSize = parseFloat(meshCellInput.value);
+      const strandWidth = parseFloat(meshStrandInput.value);
+
+      // Mesh weave needs cleanup after displacement
+      applyMeshWeaveDisplacement(height, cellSize, strandWidth);
+
+      selectedFaceIndices.clear();
+      faceAdjacency = null;
+      faceCentroids = null;
+      clearTextureSelection();
+
+      rebuildModelFromSettings();
+      textureResetBtn.disabled = false;
+    }
   }
 
   function initTexturePanel() {
@@ -3158,7 +3331,9 @@ document.addEventListener("DOMContentLoaded", () => {
 
   if (textureSelectAllBtn) {
     textureSelectAllBtn.addEventListener("click", () => {
-      if (!currentFillMesh) return;
+      if (!currentFillMesh) {
+        return;
+      }
       const faceCount = Math.floor(currentFillMesh.geometry.getAttribute("position").count / 3);
       for (let i = 0; i < faceCount; i++) {
         selectedFaceIndices.add(i);
@@ -3170,7 +3345,11 @@ document.addEventListener("DOMContentLoaded", () => {
 
   if (textureApplyBtn) {
     textureApplyBtn.addEventListener("click", () => {
-      applyTextureToGeometry();
+      try {
+        applyTextureToGeometry();
+      } catch (e) {
+        console.error("Error in applyTextureToGeometry:", e);
+      }
     });
   }
 

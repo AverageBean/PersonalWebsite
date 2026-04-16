@@ -2917,8 +2917,12 @@ document.addEventListener("DOMContentLoaded", () => {
     nonIdxGeom.setAttribute("position", new THREE.Float32BufferAttribute(newPositionArray, 3));
     nonIdxGeom.computeVertexNormals();
 
-    // Re-index for baseGeometry
-    prepareBaseGeometry(nonIdxGeom);
+    // Re-index for baseGeometry and update the main geometry object
+    const preparedGeom = prepareBaseGeometry(nonIdxGeom);
+    if (preparedGeom !== nonIdxGeom) {
+      nonIdxGeom.dispose();
+    }
+    baseGeometry = preparedGeom;
     subdivGeom.dispose();
 
     selectedFaceIndices.clear();

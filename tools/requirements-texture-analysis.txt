@@ -1,0 +1,6 @@
+# Python dependencies for texture STL analysis tool
+# Install with: pip install -r requirements-texture-analysis.txt
+
+numpy>=1.21.0
+scipy>=1.7.0
+scikit-learn>=1.0.0

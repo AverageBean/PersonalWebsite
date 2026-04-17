@@ -2799,137 +2799,153 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   function addHemisphericBumps(spacing, radius) {
-    const MAX_BUMPS = 500; // Prevent excessive geometry that freezes the viewer
+    const MAX_BUMPS = 500;
 
     if (!currentFillMesh || selectedFaceIndices.size === 0) {
       setStatus("No faces selected for bumps.");
       return false;
     }
 
-    // Switch to procedural vertex displacement approach for uniform, predictable spacing
-    // This is more reliable than geometry-based approach for complex meshes
-
-    // Backup baseGeometry for reset
     preTextureBaseGeometry = baseGeometry.clone();
 
-    // Determine subdivision level needed for fine spacing
-    baseGeometry.computeBoundingBox();
-    const bounds = baseGeometry.boundingBox;
-    const avgDim = (bounds.max.x - bounds.min.x + bounds.max.z - bounds.min.z) / 2;
-    const baseTriCount = baseGeometry.index.count / 3;
-    const targetEdgeLen = spacing / 3; // Subdivide until edge <= spacing/3
-    let subdivLevels = 0;
-    let currentEdgeLen = avgDim / Math.sqrt(baseTriCount);
+    // Collect selected face data: vertices, normals, centroids
+    const position = currentFillMesh.geometry.getAttribute("position");
+    const selectedFaces = [];
+    const selectedCentroids = [];
+    const selectedNormals = [];
 
-    while (currentEdgeLen > targetEdgeLen && subdivLevels < 4) {
-      if (baseTriCount * Math.pow(4, subdivLevels + 1) > MAX_TRIANGLES) break;
-      currentEdgeLen /= 2;
-      subdivLevels++;
-    }
-
-    // Subdivide baseGeometry
-    let subdivGeom = baseGeometry.clone();
-    for (let i = 0; i < subdivLevels; i++) {
-      const newGeom = subdivideIndexedGeometry(subdivGeom);
-      subdivGeom.dispose();
-      subdivGeom = newGeom;
-    }
-
-    // Convert to non-indexed for per-vertex processing
-    const nonIdxGeom = subdivGeom.toNonIndexed();
-    const position = nonIdxGeom.getAttribute("position");
-    const vertexCount = position.count;
-    const newPositionArray = position.array.slice();
-
-    // Collect selected face centroids for region detection
-    const selectedCentroids = Array.from(selectedFaceIndices).map(fIdx => {
-      const origPos = currentFillMesh.geometry.getAttribute("position");
+    selectedFaceIndices.forEach(fIdx => {
       const i0 = fIdx * 3, i1 = fIdx * 3 + 1, i2 = fIdx * 3 + 2;
-      return new THREE.Vector3(
-        (origPos.getX(i0) + origPos.getX(i1) + origPos.getX(i2)) / 3,
-        (origPos.getY(i0) + origPos.getY(i1) + origPos.getY(i2)) / 3,
-        (origPos.getZ(i0) + origPos.getZ(i1) + origPos.getZ(i2)) / 3
-      );
-    });
 
+      const v0 = new THREE.Vector3(position.getX(i0), position.getY(i0), position.getZ(i0));
+      const v1 = new THREE.Vector3(position.getX(i1), position.getY(i1), position.getZ(i1));
+      const v2 = new THREE.Vector3(position.getX(i2), position.getY(i2), position.getZ(i2));
 
-    // Build spatial grid for fast proximity queries
-    const originalFaceArea = (bounds.max.x - bounds.min.x) * (bounds.max.z - bounds.min.z) / baseTriCount;
-    const proximityThreshold = Math.sqrt(originalFaceArea) * 2;
-    const gridSize = Math.max(1, proximityThreshold);
-    const grid = new Map();
-
-    console.log(`proximityThreshold: ${proximityThreshold.toFixed(3)}, gridSize: ${gridSize.toFixed(3)}`);
-
-    selectedCentroids.forEach(centroid => {
-      const gx = Math.floor(centroid.x / gridSize);
-      const gy = Math.floor(centroid.y / gridSize);
-      const gz = Math.floor(centroid.z / gridSize);
-      const key = `${gx}_${gy}_${gz}`;
-      if (!grid.has(key)) grid.set(key, []);
-      grid.get(key).push(centroid);
-    });
-
-
-    // Apply procedural repeating bump pattern to all vertices in selected faces
-    let displacedCount = 0;
-
-    for (let v = 0; v < vertexCount; v++) {
-      // In non-indexed geometry: face i contains vertices 3i, 3i+1, 3i+2
-      const faceIdx = Math.floor(v / 3);
-
-      // Skip if this face wasn't selected
-      if (!selectedFaceIndices.has(faceIdx)) continue;
-
-      const vx = newPositionArray[v * 3];
-      const vy = newPositionArray[v * 3 + 1];
-      const vz = newPositionArray[v * 3 + 2];
-
-      // Compute face normal for this vertex
-      const v0Idx = faceIdx * 3;
-      const v1Idx = faceIdx * 3 + 1;
-      const v2Idx = faceIdx * 3 + 2;
-
-      const v0 = new THREE.Vector3(newPositionArray[v0Idx * 3], newPositionArray[v0Idx * 3 + 1], newPositionArray[v0Idx * 3 + 2]);
-      const v1 = new THREE.Vector3(newPositionArray[v1Idx * 3], newPositionArray[v1Idx * 3 + 1], newPositionArray[v1Idx * 3 + 2]);
-      const v2 = new THREE.Vector3(newPositionArray[v2Idx * 3], newPositionArray[v2Idx * 3 + 1], newPositionArray[v2Idx * 3 + 2]);
-
+      const centroid = new THREE.Vector3().addVectors(v0, v1).add(v2).multiplyScalar(1/3);
       const edge1 = new THREE.Vector3().subVectors(v1, v0);
       const edge2 = new THREE.Vector3().subVectors(v2, v0);
       const normal = new THREE.Vector3().crossVectors(edge1, edge2).normalize();
 
-      // Apply procedural repeating bump pattern
-      // Pattern repeats every 'spacing' units in XZ plane
-      const cellU = ((vx % spacing) + spacing) % spacing;
-      const cellV = ((vz % spacing) + spacing) % spacing;
+      selectedFaces.push({ v0, v1, v2, centroid, normal });
+      selectedCentroids.push(centroid);
+      selectedNormals.push(normal);
+    });
 
-      // Normalize to 0-1 range within cell
-      const u_norm = cellU / spacing;
-      const v_norm = cellV / spacing;
+    // Compute weighted-average normal for the region
+    const avgNormal = new THREE.Vector3();
+    selectedNormals.forEach(n => avgNormal.add(n));
+    avgNormal.normalize();
 
-      // Create smooth hemispherical bump: max at center (0.5, 0.5), zero at edges
-      const dist_from_center = Math.sqrt(Math.pow(u_norm - 0.5, 2) + Math.pow(v_norm - 0.5, 2));
-      // Smooth cosine bump: reaches 0 at distance 0.5 from center
-      const bumpValue = Math.max(0, Math.cos(Math.PI * dist_from_center / 0.5)) * 0.5 + 0.5;
+    // Build local 2D coordinate frame on surface
+    let uAxis = new THREE.Vector3(0, 1, 0);
+    if (Math.abs(avgNormal.dot(uAxis)) > 0.9) {
+      uAxis = new THREE.Vector3(1, 0, 0);
+    }
+    uAxis = new THREE.Vector3().crossVectors(avgNormal, uAxis).normalize();
+    const vAxis = new THREE.Vector3().crossVectors(uAxis, avgNormal).normalize();
 
-      const displacement = radius * bumpValue;
-      newPositionArray[v * 3] += normal.x * displacement;
-      newPositionArray[v * 3 + 1] += normal.y * displacement;
-      newPositionArray[v * 3 + 2] += normal.z * displacement;
-      displacedCount++;
+    // Project centroids to UV space and find bounds
+    let uMin = Infinity, uMax = -Infinity, vMin = Infinity, vMax = -Infinity;
+    selectedCentroids.forEach(c => {
+      const u = c.dot(uAxis);
+      const v = c.dot(vAxis);
+      uMin = Math.min(uMin, u);
+      uMax = Math.max(uMax, u);
+      vMin = Math.min(vMin, v);
+      vMax = Math.max(vMax, v);
+    });
+
+    // Create regular grid of bump positions
+    const bumpPositions = [];
+    const bumpNormals = [];
+
+    // Pad bounds slightly
+    uMin -= spacing * 0.5;
+    uMax += spacing * 0.5;
+    vMin -= spacing * 0.5;
+    vMax += spacing * 0.5;
+
+    // Grid center for reference
+    const centerU = (uMin + uMax) / 2;
+    const centerV = (vMin + vMax) / 2;
+    const centerPoint = new THREE.Vector3()
+      .addScaledVector(uAxis, centerU)
+      .addScaledVector(vAxis, centerV);
+
+    // Generate grid points
+    for (let u = Math.ceil(uMin / spacing) * spacing; u <= uMax; u += spacing) {
+      for (let v = Math.ceil(vMin / spacing) * spacing; v <= vMax; v += spacing) {
+        // Convert UV grid point to 3D world space
+        const gridPt = new THREE.Vector3()
+          .addScaledVector(uAxis, u)
+          .addScaledVector(vAxis, v);
+
+        // Find nearest selected face centroid
+        let nearestDist = Infinity;
+        let nearestIdx = -1;
+
+        selectedCentroids.forEach((c, idx) => {
+          const dist = gridPt.distanceTo(c);
+          if (dist < nearestDist) {
+            nearestDist = dist;
+            nearestIdx = idx;
+          }
+        });
+
+        // Accept bump if close enough to a selected face
+        if (nearestDist < spacing * 0.7) {
+          bumpPositions.push(gridPt);
+          bumpNormals.push(selectedNormals[nearestIdx]);
+        }
+
+        if (bumpPositions.length >= MAX_BUMPS) {
+          console.warn(`Bump limit ${MAX_BUMPS} reached`);
+          break;
+        }
+      }
+      if (bumpPositions.length >= MAX_BUMPS) break;
     }
 
+    if (bumpPositions.length === 0) {
+      setStatus("No valid bump positions found on selected faces.");
+      return false;
+    }
 
-    // Apply modified positions and rebuild
-    nonIdxGeom.setAttribute("position", new THREE.Float32BufferAttribute(newPositionArray, 3));
-    nonIdxGeom.computeVertexNormals();
+    // Create hemisphere geometries
+    const bumpGeoms = [];
+    for (let i = 0; i < bumpPositions.length; i++) {
+      const hemisphereGeom = new THREE.SphereGeometry(radius, 12, 6, 0, Math.PI * 2, 0, Math.PI / 2);
 
-    const preparedGeom = prepareBaseGeometry(nonIdxGeom);
-    if (preparedGeom !== nonIdxGeom) {
-      nonIdxGeom.dispose();
+      // Rotate to match normal direction
+      const quatTargetNormal = new THREE.Quaternion();
+      quatTargetNormal.setFromUnitVectors(new THREE.Vector3(0, 1, 0), bumpNormals[i]);
+      const rotMatrix = new THREE.Matrix4().makeRotationFromQuaternion(quatTargetNormal);
+      hemisphereGeom.applyMatrix4(rotMatrix);
+
+      // Translate to bump position
+      const transMatrix = new THREE.Matrix4().makeTranslation(
+        bumpPositions[i].x, bumpPositions[i].y, bumpPositions[i].z
+      );
+      hemisphereGeom.applyMatrix4(transMatrix);
+
+      // Convert to non-indexed
+      const nonIdxHemisphere = hemisphereGeom.toNonIndexed();
+      hemisphereGeom.dispose();
+      bumpGeoms.push(nonIdxHemisphere);
+    }
+
+    // Merge base with bumps
+    const baseNonIdx = baseGeometry.toNonIndexed();
+    const mergedGeom = mergeGeometriesNonIndexed(baseNonIdx, bumpGeoms);
+    baseNonIdx.dispose();
+    bumpGeoms.forEach(g => g.dispose());
+
+    // Prepare and apply
+    const preparedGeom = prepareBaseGeometry(mergedGeom);
+    if (preparedGeom !== mergedGeom) {
+      mergedGeom.dispose();
     }
     baseGeometry = preparedGeom;
-    subdivGeom.dispose();
 
     selectedFaceIndices.clear();
     faceAdjacency = null;
@@ -2937,7 +2953,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
     rebuildModelFromSettings();
     textureResetBtn.disabled = false;
-    setStatus(`Applied ${spacing}mm repeating bump pattern to ${displacedCount} vertices.`);
+    setStatus(`Added hemispherical bumps: ${bumpPositions.length} bumps at ${spacing}mm spacing.`);
     return true;
   }
 

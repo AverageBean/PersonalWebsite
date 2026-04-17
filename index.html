@@ -335,7 +335,10 @@
         <label for="meshStrandInput">Strand width <input id="meshStrandInput"  class="dim-input" type="number" value="0.50" step="0.05" min="0.10" max="5.0"> mm</label>
       </div>
       <div class="texture-action-buttons">
-        <button id="textureApplyBtn" class="model-tool-btn" type="button">Apply Texture</button>
+        <button id="textureApplyBtn" class="model-tool-btn" type="button">
+          <span id="textureApplyLabel">Apply Texture</span>
+          <span id="textureApplySpinner" class="btn-spinner" hidden></span>
+        </button>
         <button id="textureResetBtn" class="model-tool-btn" type="button" disabled>Reset</button>
       </div>
     </div>

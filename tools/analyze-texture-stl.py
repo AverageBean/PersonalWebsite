@@ -31,10 +31,76 @@ import struct
 import sys
 import json
 from pathlib import Path
-from scipy.spatial import distance
-from sklearn.cluster import DBSCAN
 import warnings
 warnings.filterwarnings('ignore')
+
+# scipy and sklearn are only imported when bump-spacing analysis is needed
+# (i.e. when a baseline STL is provided). Lazy-importing them avoids a 20-60s
+# startup penalty on Windows when the caller only needs geometry validation.
+
+# Files above this size bypass the dict-based STLAnalyzer (which builds vertex
+# and edge dicts that OOM on multi-million-triangle exports) and go through the
+# fast numpy-only validator instead.
+_LARGE_FILE_BYTES = 10 * 1024 * 1024  # 10 MB
+
+
+def fast_binary_stl_validate(filepath):
+    """
+    Validate a large binary STL without building Python dicts.
+
+    Reads vertex data directly into numpy arrays and checks:
+    - Degenerate triangles (duplicate vertices within a triangle)
+    - Zero-area triangles (cross-product area < 1e-6)
+
+    Non-manifold edge detection is skipped (requires an O(n) dict that
+    OOMs at multi-million-triangle scale).
+    """
+    with open(filepath, 'rb') as f:
+        header = f.read(5)
+        if header.lower().startswith(b'solid'):
+            return {'error': 'ASCII STL too large to analyze', 'geometry_valid': None,
+                    'degenerate_triangles': -1, 'fast_check': True}
+        f.seek(80)
+        count_bytes = f.read(4)
+        if len(count_bytes) < 4:
+            return {'error': 'truncated header', 'geometry_valid': False,
+                    'degenerate_triangles': -1, 'fast_check': True}
+        n_triangles = struct.unpack('I', count_bytes)[0]
+        raw = np.frombuffer(f.read(), dtype=np.uint8)
+
+    expected_bytes = n_triangles * 50
+    if len(raw) < expected_bytes:
+        return {'error': 'truncated body', 'geometry_valid': False,
+                'triangle_count': n_triangles, 'degenerate_triangles': -1, 'fast_check': True}
+
+    # Each 50-byte record: normal[0:12] v0[12:24] v1[24:36] v2[36:48] attr[48:50]
+    records = raw[:expected_bytes].reshape(n_triangles, 50)
+    v0 = np.frombuffer(np.ascontiguousarray(records[:, 12:24]).tobytes(),
+                       dtype=np.float32).reshape(n_triangles, 3)
+    v1 = np.frombuffer(np.ascontiguousarray(records[:, 24:36]).tobytes(),
+                       dtype=np.float32).reshape(n_triangles, 3)
+    v2 = np.frombuffer(np.ascontiguousarray(records[:, 36:48]).tobytes(),
+                       dtype=np.float32).reshape(n_triangles, 3)
+
+    # Zero-area check
+    cross = np.cross(v1 - v0, v2 - v0)
+    areas = np.linalg.norm(cross, axis=1) / 2
+    zero_area_count = int(np.sum(areas < 1e-6))
+
+    # Structural degenerate check (two identical vertices in same triangle)
+    same_01 = np.all(v0 == v1, axis=1)
+    same_12 = np.all(v1 == v2, axis=1)
+    same_02 = np.all(v0 == v2, axis=1)
+    degen_count = int(np.sum(same_01 | same_12 | same_02))
+
+    return {
+        'triangle_count': n_triangles,
+        'geometry_valid': degen_count == 0,
+        'degenerate_triangles': degen_count,
+        'zero_area_triangles': zero_area_count,
+        'non_manifold_edges': None,
+        'fast_check': True,
+    }
 
 
 class STLAnalyzer:
@@ -173,7 +239,9 @@ class STLAnalyzer:
         # Cluster by XY position (project to 2D)
         xy_coords = centroids[:, :2]
 
-        # DBSCAN clustering to find bump clusters
+        # DBSCAN clustering to find bump clusters — lazy import so startup is fast
+        # when only geometry validation is needed (no baseline provided)
+        from sklearn.cluster import DBSCAN
         clustering = DBSCAN(eps=2.0, min_samples=3).fit(xy_coords)
         labels = clustering.labels_
 
@@ -283,36 +351,33 @@ class STLAnalyzer:
 
     def compute_metrics(self, baseline_stl_path=None, selected_faces_count=None):
         """
-        Compute all texture metrics.
+        Compute texture metrics.
 
-        Returns dict with:
-        - spacing_mean, spacing_std_dev, spacing_uniformity_percent
-        - bump_height_mean, bump_height_std_dev
-        - coverage_precision (% of surface textured)
-        - geometry_valid, degenerate_triangles
+        Without baseline: geometry validation only (no DBSCAN/sklearn import).
+        With baseline: full analysis including spacing uniformity and bump height.
         """
         metrics = {}
 
-        # Spacing uniformity
-        spacing_mean, spacing_std_dev, uniformity = self.measure_spacing_uniformity(baseline_stl_path)
-        metrics['spacing_mean'] = spacing_mean
-        metrics['spacing_std_dev'] = spacing_std_dev
-        metrics['spacing_uniformity_percent'] = uniformity
-
-        # Bump height
-        height_mean, height_std_dev = self.measure_bump_height(baseline_stl_path)
-        metrics['bump_height_mean'] = height_mean
-        metrics['bump_height_std_dev'] = height_std_dev
-
-        # Geometry validation
+        # Geometry validation — always run, no heavy deps needed
         geo_issues = self.validate_geometry()
         metrics['geometry_valid'] = geo_issues['degenerate_triangles'] == 0
         metrics['degenerate_triangles'] = geo_issues['degenerate_triangles']
         metrics['zero_area_triangles'] = geo_issues['zero_area_triangles']
         metrics['non_manifold_edges'] = geo_issues['non_manifold_edges']
+        metrics['triangle_count'] = len(self.triangles)
 
-        # Coverage (approximate: triangle count ratio)
         if baseline_stl_path:
+            # Spacing uniformity (needs sklearn DBSCAN — lazy import here)
+            spacing_mean, spacing_std_dev, uniformity = self.measure_spacing_uniformity(baseline_stl_path)
+            metrics['spacing_mean'] = spacing_mean
+            metrics['spacing_std_dev'] = spacing_std_dev
+            metrics['spacing_uniformity_percent'] = uniformity
+
+            # Bump height
+            height_mean, height_std_dev = self.measure_bump_height(baseline_stl_path)
+            metrics['bump_height_mean'] = height_mean
+            metrics['bump_height_std_dev'] = height_std_dev
+
             _, baseline_tris = self.read_stl(baseline_stl_path)
             triangle_increase_percent = 100 * (len(self.triangles) - len(baseline_tris)) / len(baseline_tris)
             metrics['triangle_increase_percent'] = triangle_increase_percent
@@ -336,13 +401,18 @@ def main():
         print(f"Error: {baseline_path} not found")
         sys.exit(1)
 
-    print(f"Analyzing {textured_path}...", file=sys.stderr)
-    analyzer = STLAnalyzer(textured_path)
+    file_size = Path(textured_path).stat().st_size
+    print(f"Analyzing {textured_path} ({file_size / 1024 / 1024:.1f} MB)...", file=sys.stderr)
 
-    metrics = analyzer.compute_metrics(baseline_path)
+    if file_size > _LARGE_FILE_BYTES:
+        print(f"Large file — using fast numpy validator (dict-based analysis skipped)", file=sys.stderr)
+        metrics = fast_binary_stl_validate(textured_path)
+    else:
+        analyzer = STLAnalyzer(textured_path)
+        metrics = analyzer.compute_metrics(baseline_path)
 
-    # Round for readability
-    for key in metrics:
+    # Round floats for readability
+    for key in list(metrics.keys()):
         if isinstance(metrics[key], float):
             metrics[key] = round(metrics[key], 2)
 

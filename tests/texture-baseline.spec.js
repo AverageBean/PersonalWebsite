@@ -102,16 +102,16 @@ test.describe('Texture Feature — Week 1 Baseline Measurements', () => {
       console.warn('Could not get canvas bounding box');
     }
 
-    // Apply texture
-    const applyBtn = page.locator('button:has-text("Apply")');
-    if (await applyBtn.isEnabled({ timeout: 1000 }).catch(() => false)) {
-      console.log('Applying texture...');
-      await applyBtn.click();
-      await page.waitForTimeout(3000);  // Longer wait for bump computation
-      console.log('Texture applied');
-    } else {
-      console.warn('Apply button not enabled');
-    }
+    // Apply texture using stable ID locator + spinner-based completion wait
+    const applyBtn = page.locator('#textureApplyBtn');
+    await applyBtn.waitFor({ state: 'enabled', timeout: 5000 });
+    console.log('Applying texture...');
+    await applyBtn.click();
+    await page.waitForFunction(
+      () => document.querySelector('#textureApplySpinner').hidden === true,
+      { timeout: 30000 }
+    );
+    console.log('Texture applied');
 
     // Take screenshot
     const screenshotPath = await helpers.screenshotTexturedModel(page, 'bump-ring-baseline.png');
@@ -157,19 +157,14 @@ test.describe('Texture Feature — Week 1 Baseline Measurements', () => {
     await page.setInputFiles('#fileInput', baseplatePath);
     await page.waitForTimeout(2000);
 
-    // Open texture panel
-    const textureToggleBtn = page.locator('button:has-text("Texture")');
-    if (textureToggleBtn.isVisible()) {
-      await textureToggleBtn.click();
-    }
-
-    await page.waitForSelector('[id*="texture"][id*="panel"]', { visible: true, timeout: 5000 });
+    // Open texture panel using stable ID locators
+    const textureToggleBtn = page.locator('#textureToggleBtn');
+    await textureToggleBtn.waitFor({ state: 'visible', timeout: 5000 });
+    await textureToggleBtn.click();
+    await page.locator('#texturePanel').waitFor({ state: 'visible', timeout: 5000 });
 
     // Select mesh weave preset
-    const presetSelect = page.locator('select[id*="preset"]');
-    if (presetSelect.isVisible()) {
-      await presetSelect.selectOption('mesh');
-    }
+    await page.locator('#texturePresetSelect').selectOption('mesh');
 
     // Click on flat top surface
     const canvas = page.locator('#viewerCanvas');
@@ -179,12 +174,12 @@ test.describe('Texture Feature — Week 1 Baseline Measurements', () => {
       await page.waitForTimeout(500);
     }
 
-    // Apply texture
-    const applyBtn = page.locator('button:has-text("Apply")').first();
-    if (applyBtn.isEnabled()) {
-      await applyBtn.click();
-      await page.waitForTimeout(3000);  // Weave takes longer
-    }
+    // Apply using stable ID + spinner wait
+    await page.locator('#textureApplyBtn').click();
+    await page.waitForFunction(
+      () => document.querySelector('#textureApplySpinner').hidden === true,
+      { timeout: 60000 }
+    );
 
     // Take screenshot
     const screenshotPath = await helpers.screenshotTexturedModel(page, 'weave-baseplate-baseline.png');

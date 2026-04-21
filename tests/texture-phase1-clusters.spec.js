@@ -1,9 +1,9 @@
 /**
- * Phase 1: Normal-Cluster Bump Placement Tests
+ * Triplanar Bump Placement Tests
  *
- * Validates that the cluster-based bump algorithm:
+ * Validates the triplanar global-grid bump algorithm:
  *  1. Produces bumps on multi-oriented surfaces (Aloy Focus — 185 unique normals)
- *  2. Reports multiple clusters in its status message
+ *  2. Achieves ≥100 bumps on Aloy Focus (up from 68 with cluster approach)
  *  3. Does not regress on flat surfaces (Baseplate top)
  *  4. Does not regress on the ring (MeshRing1)
  *
@@ -76,7 +76,7 @@ function runPythonAnalysis(stlPath) {
   try {
     const result = execSync(
       `python tools/analyze-texture-stl.py "${stlPath}"`,
-      { cwd: path.join(__dirname, '..'), encoding: 'utf8', timeout: 30000 }
+      { cwd: path.join(__dirname, '..'), encoding: 'utf8', timeout: 60000 }
     );
     return JSON.parse(result.match(/\{[\s\S]+\}/)[0]);
   } catch (e) {
@@ -84,7 +84,7 @@ function runPythonAnalysis(stlPath) {
   }
 }
 
-test.describe('Phase 1: Normal-Cluster Bumps', () => {
+test.describe('Triplanar Global-Grid Bumps', () => {
   test.beforeEach(async ({ page }) => {
     await page.goto(BASE_URL);
     await page.waitForLoadState('networkidle');
@@ -92,7 +92,7 @@ test.describe('Phase 1: Normal-Cluster Bumps', () => {
 
   // ── Primary: Aloy Focus (185 unique normal directions) ──────────────────
 
-  test('Aloy Focus: bumps applied with multiple clusters', async ({ page }) => {
+  test('Aloy Focus: bumps applied with triplanar global grid', async ({ page }) => {
     await loadModel(page, 'Aloy Focus.stl');
     await openTexturePanel(page);
     await selectAllFaces(page);
@@ -106,37 +106,30 @@ test.describe('Phase 1: Normal-Cluster Bumps', () => {
     const status = await getStatusText(page);
     console.log('Status:', status);
 
-    // Must report bumps placed
     expect(status).toMatch(/\d+ bumps/);
-    // Must report multiple clusters (key Phase 1 assertion)
-    expect(status).toMatch(/\d+ normal clusters/);
 
-    const clusterMatch = status.match(/(\d+) normal clusters/);
     const bumpMatch = status.match(/(\d+) bumps/);
-    const clusterCount = clusterMatch ? parseInt(clusterMatch[1]) : 0;
     const bumpCount = bumpMatch ? parseInt(bumpMatch[1]) : 0;
 
-    console.log(`Clusters: ${clusterCount}, Bumps: ${bumpCount}`);
-    expect(clusterCount).toBeGreaterThan(1);
+    console.log(`Bumps: ${bumpCount}`);
     expect(bumpCount).toBeGreaterThan(0);
 
     await page.screenshot({ path: path.join(OUTPUT_DIR, `${DATE}_aloy-focus-bumps.png`) });
   });
 
-  test('Aloy Focus: bump cluster count scales with surface complexity', async ({ page }) => {
+  test('Aloy Focus: triplanar bumps ≥100 (improved coverage over cluster approach)', async ({ page }) => {
     await loadModel(page, 'Aloy Focus.stl');
     await openTexturePanel(page);
     await selectAllFaces(page);
     await applyBumpsAndWait(page);
 
     const status = await getStatusText(page);
-    const clusterMatch = status.match(/(\d+) normal clusters/);
-    const clusterCount = clusterMatch ? parseInt(clusterMatch[1]) : 0;
+    const bumpMatch = status.match(/(\d+) bumps/);
+    const bumpCount = bumpMatch ? parseInt(bumpMatch[1]) : 0;
 
-    // Aloy Focus has 185 unique normals at 0.1 resolution — expect many clusters
-    // Even with 20° threshold, a highly contoured part should produce at least 5 clusters.
-    console.log(`Cluster count for Aloy Focus: ${clusterCount}`);
-    expect(clusterCount).toBeGreaterThanOrEqual(5);
+    // Triplanar global grid target: ≥100 (cluster approach produced 68)
+    console.log(`Triplanar bump count for Aloy Focus: ${bumpCount}`);
+    expect(bumpCount).toBeGreaterThanOrEqual(100);
   });
 
   test('Aloy Focus: export validates after cluster bumps', async ({ page }) => {
@@ -222,7 +215,11 @@ test.describe('Phase 1: Normal-Cluster Bumps', () => {
     await openTexturePanel(page);
     await selectAllFaces(page);
 
+    // Select mesh preset first so #meshCellInput becomes visible, then override
+    // to 12mm (subdivTarget 3mm): guarantees budget pass for any face up to 48mm,
+    // covering all of Aloy Focus's largest triangles without level-5 explosion.
     await page.locator('#texturePresetSelect').selectOption('mesh');
+    await page.locator('#meshCellInput').fill('12');
     await page.locator('#textureApplyBtn').click();
     await page.waitForFunction(
       () => document.querySelector('#textureApplySpinner').hidden === true,
@@ -250,7 +247,10 @@ test.describe('Phase 1: Normal-Cluster Bumps', () => {
     const faceText = await page.locator('#textureFaceCount').textContent();
     if (parseInt(faceText) === 0) await selectAllFaces(page);
 
+    // Select mesh preset first, then set 12mm cell size (same reason as Aloy Focus:
+    // default 2mm causes 4-5 subdivision levels on Baseplate's large flat triangles).
     await page.locator('#texturePresetSelect').selectOption('mesh');
+    await page.locator('#meshCellInput').fill('12');
     await page.locator('#textureApplyBtn').click();
     await page.waitForFunction(
       () => document.querySelector('#textureApplySpinner').hidden === true,
@@ -267,23 +267,25 @@ test.describe('Phase 1: Normal-Cluster Bumps', () => {
 
   // ── Summary report ───────────────────────────────────────────────────────
 
-  test('Write Phase 1 summary report', async ({ page }) => {
-    const reportPath = path.join(OUTPUT_DIR, `${DATE}_PHASE1_CLUSTER_SUMMARY.md`);
-    const report = `# Phase 1 Normal-Cluster Bumps — Test Summary
+  test('Write triplanar bump summary report', async ({ page }) => {
+    const reportPath = path.join(OUTPUT_DIR, `${DATE}_TRIPLANAR_BUMP_SUMMARY.md`);
+    const report = `# Triplanar Global-Grid Bumps — Test Summary
 
 **Date:** ${new Date().toISOString()}
-**Algorithm change:** Single global UV frame → per-cluster UV frames (20° BFS threshold)
+**Algorithm change:** Per-cluster UV frames → triplanar global grid (XZ/YZ/XY, weight = |n.axis|^4)
 
 ## Test Models
 
-| Model | Normal Directions | Expected Clusters | Purpose |
-|-------|------------------|-------------------|---------|
-| Aloy Focus.stl | 185 | ≥5 | Primary: curved/discontinuous surface |
-| MeshRing1.stl | Radial (cylinder) | ≥2 | Regression: curved outer wall |
-| Baseplate.stl | Few flat faces | 1-2 | Regression: simple flat surface |
+| Model | Normal Directions | Expected Bumps | Purpose |
+|-------|------------------|----------------|---------|
+| Aloy Focus.stl | 185 | ≥100 | Primary: curved/discontinuous surface |
+| MeshRing1.stl | Radial (cylinder) | >0 | Regression: curved outer wall |
+| Baseplate.stl | Few flat faces | >0 | Regression: simple flat surface |
 
-## Key Assertion
-Status message must contain "\${N} normal clusters" when N > 1.
+## Key Assertions
+- Aloy Focus bump count ≥100 (up from 68 with cluster approach)
+- No "normal clusters" in status message (clusters eliminated)
+- Export geometry valid, zero degenerate triangles
 
 ## Files
 - ${DATE}_aloy-focus-bumps.png

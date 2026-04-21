@@ -2792,6 +2792,20 @@ document.addEventListener("DOMContentLoaded", () => {
     return (bandU < fraction || bandV < fraction) ? 1 : 0;
   }
 
+  // Triplanar blend of meshValue — eliminates per-cluster seam lines.
+  // Weights each of the three axis-aligned projections by |n.axis|^k so that
+  // the dominant projection for any face orientation is used, with smooth
+  // blending on faces tilted between axes (k=4 gives clean, tight transitions).
+  function triplanarMeshValue(v, n, cellSize, strandWidth, k) {
+    const wx = Math.pow(Math.abs(n.x), k);
+    const wy = Math.pow(Math.abs(n.y), k);
+    const wz = Math.pow(Math.abs(n.z), k);
+    const wt = wx + wy + wz || 1;
+    return (wx * meshValue(v.y, v.z, cellSize, strandWidth)
+          + wy * meshValue(v.x, v.z, cellSize, strandWidth)
+          + wz * meshValue(v.x, v.y, cellSize, strandWidth)) / wt;
+  }
+
   // Returns true if `point` (already projected onto the triangle plane) is
   // inside or on the boundary of triangle (v0, v1, v2).
   // Works regardless of CW/CCW winding by checking all sub-area signs match.
@@ -2815,25 +2829,17 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // ─── Hemispherical bumps ────────────────────────────────────────────────
   //
-  // Algorithm:
-  //  1. Build per-face data map (faceIdx → v0/v1/v2/normal/centroid).
-  //  2. Cluster selected faces by normal similarity (greedy BFS on faceAdjacency,
-  //     30° threshold).  Each cluster is a group of co-oriented faces that can be
-  //     covered by a single flat tangent frame — e.g. a flat panel, one arc of a
-  //     cylinder, or one facet of a chamfer.  Using per-cluster frames instead of
-  //     one global frame gives full coverage on curved and multi-oriented surfaces.
-  //  3. For each cluster independently:
-  //     a. Compute cluster weighted-average normal → uAxis/vAxis tangent frame.
-  //     b. Project cluster vertices into UV space → AABB.
-  //     c. Generate grid over AABB (step = spacing).
-  //     d. For each grid point: find nearest cluster face by centroid distance,
-  //        project onto face plane, run barycentric containment test.
-  //        Accepted points get a bump using the face's own normal (per-face, not averaged).
-  //     e. Centroid fallback: if the grid produced zero bumps for a cluster (its AABB
-  //        is smaller than one grid cell, or all grid points miss every triangle), place
-  //        one bump at the area-weighted centroid of the cluster, projected onto the
-  //        nearest face plane.  Eliminates empty patches on micro-clusters.
-  //  4. Merge all cluster bump lists; build hemispheres and concatenate into baseGeometry.
+  // Algorithm (triplanar global grid):
+  //  1. Build per-face data array (v0/v1/v2/normal/centroid).
+  //  2. Compute world-space AABB of all selected faces.
+  //  3. Cast three axis-aligned grids (XZ for Y-faces, YZ for X-faces, XY for Z-faces)
+  //     at step = spacing.  Each grid finds the nearest selected face using 2D
+  //     projected distance in its own plane, then projects the candidate onto that
+  //     face's 3D plane and runs a barycentric containment test.
+  //     Accepted candidates carry weight = |n.axis|^4 for their grid axis.
+  //  4. Sort candidates by weight descending; greedily accept, skipping any candidate
+  //     within spacing/2 of an already-accepted site (deduplication).
+  //  5. Place hemisphere at each accepted site using the face's own normal.
   //
   function addHemisphericBumps(spacing, radius) {
     if (!currentFillMesh || selectedFaceIndices.size === 0) {
@@ -2842,12 +2848,12 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     const MAX_BUMPS = 2000;
-    const CLUSTER_COS = Math.cos(30 * Math.PI / 180); // faces within 30° share a cluster
+    const K = 4; // triplanar blend sharpness exponent
     const renderGeom = currentFillMesh.geometry;
     const position = renderGeom.getAttribute("position");
 
-    // 1. Build per-face data map keyed by face index
-    const faceDataMap = new Map();
+    // 1. Per-face data
+    const faceData = [];
     selectedFaceIndices.forEach(fIdx => {
       const i0 = fIdx * 3, i1 = fIdx * 3 + 1, i2 = fIdx * 3 + 2;
       const v0 = new THREE.Vector3(position.getX(i0), position.getY(i0), position.getZ(i0));
@@ -2857,155 +2863,135 @@ document.addEventListener("DOMContentLoaded", () => {
         .crossVectors(new THREE.Vector3().subVectors(v1, v0), new THREE.Vector3().subVectors(v2, v0))
         .normalize();
       const centroid = new THREE.Vector3().addVectors(v0, v1).add(v2).divideScalar(3);
-      faceDataMap.set(fIdx, { v0, v1, v2, normal, centroid });
+      faceData.push({ v0, v1, v2, normal, centroid });
     });
 
-    // 2. Greedy BFS clustering — each cluster groups contiguous faces whose normals
-    //    are within CLUSTER_COS of the seed face's normal.  faceAdjacency built by
-    //    initTexturePanel() so it covers the full mesh including unselected faces.
-    const assigned = new Set();
-    const clusters = [];
-
-    for (const seedFace of selectedFaceIndices) {
-      if (assigned.has(seedFace)) continue;
-      const seedNormal = faceDataMap.get(seedFace).normal;
-      const cluster = [];
-      const queue = [seedFace];
-      let head = 0;
-
-      while (head < queue.length) {
-        const f = queue[head++];
-        if (assigned.has(f)) continue;
-        assigned.add(f);
-        cluster.push(f);
-        const adj = faceAdjacency ? faceAdjacency.get(f) : null;
-        if (!adj) continue;
-        adj.forEach(adjFace => {
-          if (!assigned.has(adjFace) && selectedFaceIndices.has(adjFace) &&
-              faceDataMap.get(adjFace).normal.dot(seedNormal) >= CLUSTER_COS) {
-            queue.push(adjFace);
-          }
-        });
+    // 2. AABB of all selected faces
+    let xMin = Infinity, xMax = -Infinity;
+    let yMin = Infinity, yMax = -Infinity;
+    let zMin = Infinity, zMax = -Infinity;
+    for (const { v0, v1, v2 } of faceData) {
+      for (const v of [v0, v1, v2]) {
+        if (v.x < xMin) xMin = v.x; if (v.x > xMax) xMax = v.x;
+        if (v.y < yMin) yMin = v.y; if (v.y > yMax) yMax = v.y;
+        if (v.z < zMin) zMin = v.z; if (v.z > zMax) zMax = v.z;
       }
-
-      if (cluster.length > 0) clusters.push(cluster);
     }
 
-    // 3. Per-cluster grid placement
-    const bumpCenters = [], bumpNormals = [];
+    // Project pt onto face plane; return candidate {position,normal,weight} or null.
+    function projectAndTest(pt, face, weight) {
+      const d = new THREE.Vector3().subVectors(pt, face.v0).dot(face.normal);
+      const projected = pt.clone().addScaledVector(face.normal, -d);
+      if (!isInsideTriangle(projected, face.v0, face.v1, face.v2, face.normal)) return null;
+      return { position: projected, normal: face.normal.clone(), weight };
+    }
+
+    // 3. Three axis-aligned grids
     const EPS = spacing * 0.001;
-    let bumpLimitReached = false;
+    const raw = [];
 
-    for (const cluster of clusters) {
-      if (bumpLimitReached) break;
-      const clusterFaces = cluster.map(fIdx => faceDataMap.get(fIdx));
-
-      // Cluster tangent frame from weighted-average normal
-      const avgNormal = new THREE.Vector3();
-      clusterFaces.forEach(f => avgNormal.add(f.normal));
-      avgNormal.normalize();
-
-      const uAxis = new THREE.Vector3(0, 1, 0);
-      if (Math.abs(avgNormal.dot(uAxis)) > 0.9) uAxis.set(1, 0, 0);
-      uAxis.crossVectors(avgNormal, uAxis).normalize();
-      const vAxis = new THREE.Vector3().crossVectors(uAxis, avgNormal).normalize();
-
-      // AABB in cluster UV space
-      let uMin = Infinity, uMax = -Infinity, vMin = Infinity, vMax = -Infinity;
-      clusterFaces.forEach(({ v0, v1, v2 }) => {
-        for (const v of [v0, v1, v2]) {
-          const pu = v.dot(uAxis), pv = v.dot(vAxis);
-          if (pu < uMin) uMin = pu; if (pu > uMax) uMax = pu;
-          if (pv < vMin) vMin = pv; if (pv > vMax) vMax = pv;
+    // XZ grid — Y-facing surfaces (weight = |n.y|^K)
+    // Nearest face found by 2D distance in XZ projection; anchor y = face centroid y.
+    for (let x = Math.ceil(xMin / spacing) * spacing; x <= xMax + EPS; x += spacing) {
+      for (let z = Math.ceil(zMin / spacing) * spacing; z <= zMax + EPS; z += spacing) {
+        let nearest = null, minDSq = Infinity;
+        for (const f of faceData) {
+          const dx = f.centroid.x - x, dz = f.centroid.z - z;
+          const dSq = dx * dx + dz * dz;
+          if (dSq < minDSq) { minDSq = dSq; nearest = f; }
         }
-      });
-
-      // Grid → nearest cluster face → barycentric containment
-      const priorCount = bumpCenters.length;
-      clusterGrid: for (let u = Math.ceil(uMin / spacing) * spacing; u <= uMax + EPS; u += spacing) {
-        for (let v = Math.ceil(vMin / spacing) * spacing; v <= vMax + EPS; v += spacing) {
-          const gridPt = new THREE.Vector3().addScaledVector(uAxis, u).addScaledVector(vAxis, v);
-
-          let nearestFace = null, nearestDistSq = Infinity;
-          for (const f of clusterFaces) {
-            const dSq = gridPt.distanceToSquared(f.centroid);
-            if (dSq < nearestDistSq) { nearestDistSq = dSq; nearestFace = f; }
-          }
-          if (!nearestFace) continue;
-
-          const distToPlane = new THREE.Vector3().subVectors(gridPt, nearestFace.v0).dot(nearestFace.normal);
-          const projected = gridPt.clone().addScaledVector(nearestFace.normal, -distToPlane);
-
-          if (!isInsideTriangle(projected, nearestFace.v0, nearestFace.v1, nearestFace.v2, nearestFace.normal)) {
-            continue;
-          }
-
-          bumpCenters.push(projected);
-          bumpNormals.push(nearestFace.normal.clone());
-
-          if (bumpCenters.length >= MAX_BUMPS) { bumpLimitReached = true; break clusterGrid; }
-        }
-      }
-
-      // Centroid fallback: grid missed this cluster entirely — place one bump at the
-      // area-weighted centroid projected onto the nearest face plane.
-      if (bumpCenters.length === priorCount && !bumpLimitReached) {
-        let totalArea = 0;
-        const weightedCenter = new THREE.Vector3();
-        clusterFaces.forEach(f => {
-          const area = new THREE.Vector3()
-            .crossVectors(
-              new THREE.Vector3().subVectors(f.v1, f.v0),
-              new THREE.Vector3().subVectors(f.v2, f.v0)
-            ).length() * 0.5;
-          weightedCenter.addScaledVector(f.centroid, area);
-          totalArea += area;
-        });
-        if (totalArea > 0) {
-          weightedCenter.divideScalar(totalArea);
-          let nearestFace = null, nearestDistSq = Infinity;
-          for (const f of clusterFaces) {
-            const dSq = weightedCenter.distanceToSquared(f.centroid);
-            if (dSq < nearestDistSq) { nearestDistSq = dSq; nearestFace = f; }
-          }
-          if (nearestFace) {
-            const d = new THREE.Vector3().subVectors(weightedCenter, nearestFace.v0).dot(nearestFace.normal);
-            const projected = weightedCenter.clone().addScaledVector(nearestFace.normal, -d);
-            bumpCenters.push(projected);
-            bumpNormals.push(nearestFace.normal.clone());
-            if (bumpCenters.length >= MAX_BUMPS) bumpLimitReached = true;
-          }
-        }
+        if (!nearest) continue;
+        const w = Math.pow(Math.abs(nearest.normal.y), K);
+        const c = projectAndTest(new THREE.Vector3(x, nearest.centroid.y, z), nearest, w);
+        if (c) raw.push(c);
       }
     }
 
-    if (bumpCenters.length === 0) {
+    // YZ grid — X-facing surfaces (weight = |n.x|^K)
+    // Nearest face found by 2D distance in YZ projection; anchor x = face centroid x.
+    for (let y = Math.ceil(yMin / spacing) * spacing; y <= yMax + EPS; y += spacing) {
+      for (let z = Math.ceil(zMin / spacing) * spacing; z <= zMax + EPS; z += spacing) {
+        let nearest = null, minDSq = Infinity;
+        for (const f of faceData) {
+          const dy = f.centroid.y - y, dz = f.centroid.z - z;
+          const dSq = dy * dy + dz * dz;
+          if (dSq < minDSq) { minDSq = dSq; nearest = f; }
+        }
+        if (!nearest) continue;
+        const w = Math.pow(Math.abs(nearest.normal.x), K);
+        const c = projectAndTest(new THREE.Vector3(nearest.centroid.x, y, z), nearest, w);
+        if (c) raw.push(c);
+      }
+    }
+
+    // XY grid — Z-facing surfaces (weight = |n.z|^K)
+    // Nearest face found by 2D distance in XY projection; anchor z = face centroid z.
+    for (let x = Math.ceil(xMin / spacing) * spacing; x <= xMax + EPS; x += spacing) {
+      for (let y = Math.ceil(yMin / spacing) * spacing; y <= yMax + EPS; y += spacing) {
+        let nearest = null, minDSq = Infinity;
+        for (const f of faceData) {
+          const dx = f.centroid.x - x, dy = f.centroid.y - y;
+          const dSq = dx * dx + dy * dy;
+          if (dSq < minDSq) { minDSq = dSq; nearest = f; }
+        }
+        if (!nearest) continue;
+        const w = Math.pow(Math.abs(nearest.normal.z), K);
+        const c = projectAndTest(new THREE.Vector3(x, y, nearest.centroid.z), nearest, w);
+        if (c) raw.push(c);
+      }
+    }
+
+    // 3b. Centroid coverage pass — weight=-1 (lower than any grid candidate) so triplanar
+    //     grid bumps always place first; face centroids fill uncovered gaps only.
+    for (const f of faceData) {
+      raw.push({ position: f.centroid.clone(), normal: f.normal.clone(), weight: -1 });
+    }
+
+    // 4. Deduplicate: sort by weight desc, greedily accept sites >= spacing/2 apart
+    raw.sort((a, b) => b.weight - a.weight);
+    const dedupDistSq = (spacing * 0.5) * (spacing * 0.5);
+    const accepted = [];
+    const acceptedPos = [];
+
+    for (const c of raw) {
+      if (accepted.length >= MAX_BUMPS) break;
+      let tooClose = false;
+      for (const p of acceptedPos) {
+        if (c.position.distanceToSquared(p) < dedupDistSq) { tooClose = true; break; }
+      }
+      if (!tooClose) {
+        accepted.push(c);
+        acceptedPos.push(c.position);
+      }
+    }
+
+    if (accepted.length === 0) {
       setStatus("No valid bump positions found. Try selecting more faces or reducing spacing.");
       return false;
     }
 
-    // 4. Triangle budget — SphereGeometry(r, 12, 6) has 12×6×2 = 144 tris/hemisphere
+    // 5. Triangle budget — SphereGeometry(r, 12, 6) → 144 tris/hemisphere
     const baseTriCount = baseGeometry.index
       ? baseGeometry.index.count / 3
       : baseGeometry.getAttribute("position").count / 3;
-    if (baseTriCount + bumpCenters.length * 144 > MAX_TRIANGLES) {
+    if (baseTriCount + accepted.length * 144 > MAX_TRIANGLES) {
       setStatus(`Too many bumps — would exceed the ${(MAX_TRIANGLES / 1e6).toFixed(0)}M triangle limit. Reduce spacing or selection.`);
       return false;
     }
 
-    // 5. Build and merge hemispheres
+    // 6. Build and merge hemispheres
     preTextureBaseGeometry = baseGeometry.clone();
 
     const positionArrays = [renderGeom.getAttribute("position").array.slice()];
     const yUp = new THREE.Vector3(0, 1, 0);
 
-    for (let i = 0; i < bumpCenters.length; i++) {
+    for (let i = 0; i < accepted.length; i++) {
       const hemi = new THREE.SphereGeometry(radius, 12, 6, 0, Math.PI * 2, 0, Math.PI / 2);
       hemi.applyMatrix4(new THREE.Matrix4().makeRotationFromQuaternion(
-        new THREE.Quaternion().setFromUnitVectors(yUp, bumpNormals[i])
+        new THREE.Quaternion().setFromUnitVectors(yUp, accepted[i].normal)
       ));
       hemi.applyMatrix4(new THREE.Matrix4().makeTranslation(
-        bumpCenters[i].x, bumpCenters[i].y, bumpCenters[i].z
+        accepted[i].position.x, accepted[i].position.y, accepted[i].position.z
       ));
       const nonIdx = hemi.toNonIndexed();
       positionArrays.push(nonIdx.getAttribute("position").array.slice());
@@ -3021,21 +3007,18 @@ document.addEventListener("DOMContentLoaded", () => {
     const mergedGeom = new THREE.BufferGeometry();
     mergedGeom.setAttribute("position", new THREE.Float32BufferAttribute(allPos, 3));
 
-    // 6. Finalize
+    // 7. Finalize
     const prepared = prepareBaseGeometry(mergedGeom);
     if (prepared !== mergedGeom) mergedGeom.dispose();
     baseGeometry = prepared;
 
-    // clearCurrentModel() inside rebuildModelFromSettings() nulls preTextureBaseGeometry,
-    // so save and restore it around the rebuild.
     const savedPre = preTextureBaseGeometry;
     clearTextureSelection();
     rebuildModelFromSettings();
     preTextureBaseGeometry = savedPre;
     textureResetBtn.disabled = false;
 
-    const clusterMsg = clusters.length > 1 ? ` across ${clusters.length} normal clusters` : "";
-    setStatus(`Applied ${bumpCenters.length} bumps${clusterMsg} — ${spacing}mm spacing, ${radius}mm radius.`);
+    setStatus(`Applied ${accepted.length} bumps — ${spacing}mm spacing, ${radius}mm radius.`);
     return true;
   }
 
@@ -3046,11 +3029,10 @@ document.addEventListener("DOMContentLoaded", () => {
   //     using the explicit selectedFaceIndices membership (no proximity heuristic).
   //  2. Adaptively subdivide each selected face until the longest edge ≤ cellSize/4.
   //     Subdivision is per-face recursive (no crack-welding needed for texture).
-  //  3. For each selected face build a local tangent frame (uAxis, vAxis) from the
-  //     face normal.  Displace each vertex along the face normal by
-  //     height × meshValue(v·uAxis, v·vAxis, cellSize, strandWidth).
-  //     Using per-face UV instead of world XZ makes the stripe pattern align with
-  //     the surface on tilted and vertical faces — no compression artifacts.
+  //  3. For each selected face displace each vertex along the face normal by
+  //     height × triplanarMeshValue(v, normal, cellSize, strandWidth, 4).
+  //     Triplanar blends three axis-aligned projections weighted by |n.axis|^4 —
+  //     no per-face tangent frame needed, no cluster seam lines.
   //  4. Concatenate displaced selected faces + untouched unselected faces.
   //  5. Run prepareBaseGeometry → new baseGeometry.
   //
@@ -3065,19 +3047,19 @@ document.addEventListener("DOMContentLoaded", () => {
     const faceCount = Math.floor(position.count / 3);
     const subdivTarget = cellSize / 4;
 
-    // Budget estimate: sample actual edge lengths to determine subdivision depth
-    let maxSampledEdge = 0;
-    let sampleN = 0;
+    // Scan ALL selected faces for the true maximum edge length.
+    // Sampling only a subset (old 50-face cap) underestimates subdivision depth
+    // and allows triangle counts to exceed MAX_TRIANGLES.
+    let maxEdgeLen = 0;
     for (const fIdx of selectedFaceIndices) {
-      if (sampleN++ >= 50) break;
       const i0 = fIdx * 3, i1 = fIdx * 3 + 1, i2 = fIdx * 3 + 2;
       const sv0 = new THREE.Vector3(position.getX(i0), position.getY(i0), position.getZ(i0));
       const sv1 = new THREE.Vector3(position.getX(i1), position.getY(i1), position.getZ(i1));
       const sv2 = new THREE.Vector3(position.getX(i2), position.getY(i2), position.getZ(i2));
-      maxSampledEdge = Math.max(maxSampledEdge, sv0.distanceTo(sv1), sv1.distanceTo(sv2), sv2.distanceTo(sv0));
+      maxEdgeLen = Math.max(maxEdgeLen, sv0.distanceTo(sv1), sv1.distanceTo(sv2), sv2.distanceTo(sv0));
     }
-    const estimatedLevels = maxSampledEdge > subdivTarget
-      ? Math.min(5, Math.ceil(Math.log2(maxSampledEdge / subdivTarget)))
+    const estimatedLevels = maxEdgeLen > subdivTarget
+      ? Math.min(5, Math.ceil(Math.log2(maxEdgeLen / subdivTarget)))
       : 0;
     const estimatedMultiplier = Math.pow(4, estimatedLevels);
     if (selectedFaceIndices.size * estimatedMultiplier + faceCount > MAX_TRIANGLES) {
@@ -3085,27 +3067,35 @@ document.addEventListener("DOMContentLoaded", () => {
       return false;
     }
 
-    const selectedPositions = [];
-    const unselectedPositions = [];
+    // Pre-allocate typed arrays sized to the worst-case output.
+    // Since maxEdgeLen is the true max, selWriteIdx is guaranteed not to exceed
+    // maxSelectedFloats: every face subdivides at most estimatedMultiplier times.
+    const maxSelectedFloats = selectedFaceIndices.size * estimatedMultiplier * 9;
+    const maxUnselectedFloats = (faceCount - selectedFaceIndices.size) * 9;
+    const selectedPositions = new Float32Array(maxSelectedFloats);
+    const unselectedPositions = new Float32Array(maxUnselectedFloats);
+    let selWriteIdx = 0;
+    let unselWriteIdx = 0;
 
-    function subdivideAndDisplace(v0, v1, v2, normal, uAxis, vAxis, level) {
+    function subdivideAndDisplace(v0, v1, v2, normal, level) {
       const maxEdge = Math.max(v0.distanceTo(v1), v1.distanceTo(v2), v2.distanceTo(v0));
       if (maxEdge > subdivTarget && level < 5) {
         const m01 = new THREE.Vector3().addVectors(v0, v1).multiplyScalar(0.5);
         const m12 = new THREE.Vector3().addVectors(v1, v2).multiplyScalar(0.5);
         const m20 = new THREE.Vector3().addVectors(v2, v0).multiplyScalar(0.5);
-        subdivideAndDisplace(v0, m01, m20, normal, uAxis, vAxis, level + 1);
-        subdivideAndDisplace(m01, v1, m12, normal, uAxis, vAxis, level + 1);
-        subdivideAndDisplace(m20, m12, v2, normal, uAxis, vAxis, level + 1);
-        subdivideAndDisplace(m01, m12, m20, normal, uAxis, vAxis, level + 1);
+        subdivideAndDisplace(v0, m01, m20, normal, level + 1);
+        subdivideAndDisplace(m01, v1, m12, normal, level + 1);
+        subdivideAndDisplace(m20, m12, v2, normal, level + 1);
+        subdivideAndDisplace(m01, m12, m20, normal, level + 1);
       } else {
-        // Displace along face normal; sample pattern in face-local UV space
         function d(v) {
-          const val = meshValue(v.dot(uAxis), v.dot(vAxis), cellSize, strandWidth);
+          const val = triplanarMeshValue(v, normal, cellSize, strandWidth, 4);
           return v.clone().addScaledVector(normal, height * val);
         }
         const d0 = d(v0), d1 = d(v1), d2 = d(v2);
-        selectedPositions.push(d0.x, d0.y, d0.z, d1.x, d1.y, d1.z, d2.x, d2.y, d2.z);
+        selectedPositions[selWriteIdx++] = d0.x; selectedPositions[selWriteIdx++] = d0.y; selectedPositions[selWriteIdx++] = d0.z;
+        selectedPositions[selWriteIdx++] = d1.x; selectedPositions[selWriteIdx++] = d1.y; selectedPositions[selWriteIdx++] = d1.z;
+        selectedPositions[selWriteIdx++] = d2.x; selectedPositions[selWriteIdx++] = d2.y; selectedPositions[selWriteIdx++] = d2.z;
       }
     }
 
@@ -3119,21 +3109,17 @@ document.addEventListener("DOMContentLoaded", () => {
         const normal = new THREE.Vector3()
           .crossVectors(new THREE.Vector3().subVectors(v1, v0), new THREE.Vector3().subVectors(v2, v0))
           .normalize();
-        // Per-face tangent frame — pattern samples in surface coordinates, not world XZ
-        const uAxis = new THREE.Vector3(0, 1, 0);
-        if (Math.abs(normal.dot(uAxis)) > 0.9) uAxis.set(1, 0, 0);
-        uAxis.crossVectors(normal, uAxis).normalize();
-        const vAxis = new THREE.Vector3().crossVectors(uAxis, normal).normalize();
-        subdivideAndDisplace(v0, v1, v2, normal, uAxis, vAxis, 0);
+        subdivideAndDisplace(v0, v1, v2, normal, 0);
       } else {
-        unselectedPositions.push(v0.x, v0.y, v0.z, v1.x, v1.y, v1.z, v2.x, v2.y, v2.z);
+        unselectedPositions[unselWriteIdx++] = v0.x; unselectedPositions[unselWriteIdx++] = v0.y; unselectedPositions[unselWriteIdx++] = v0.z;
+        unselectedPositions[unselWriteIdx++] = v1.x; unselectedPositions[unselWriteIdx++] = v1.y; unselectedPositions[unselWriteIdx++] = v1.z;
+        unselectedPositions[unselWriteIdx++] = v2.x; unselectedPositions[unselWriteIdx++] = v2.y; unselectedPositions[unselWriteIdx++] = v2.z;
       }
     }
 
-    const totalFloats = selectedPositions.length + unselectedPositions.length;
-    const allPos = new Float32Array(totalFloats);
-    allPos.set(selectedPositions, 0);
-    allPos.set(unselectedPositions, selectedPositions.length);
+    const allPos = new Float32Array(selWriteIdx + unselWriteIdx);
+    allPos.set(selectedPositions.subarray(0, selWriteIdx), 0);
+    allPos.set(unselectedPositions.subarray(0, unselWriteIdx), selWriteIdx);
 
     const mergedGeom = new THREE.BufferGeometry();
     mergedGeom.setAttribute("position", new THREE.Float32BufferAttribute(allPos, 3));

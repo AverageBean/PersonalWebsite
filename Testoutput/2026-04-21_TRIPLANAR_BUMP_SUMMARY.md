@@ -1,6 +1,6 @@
 # Triplanar Global-Grid Bumps — Test Summary
 
-**Date:** 2026-04-21T17:20:02.230Z
+**Date:** 2026-04-21T18:31:09.605Z
 **Algorithm change:** Per-cluster UV frames → triplanar global grid (XZ/YZ/XY, weight = |n.axis|^4)
 
 ## Test Models

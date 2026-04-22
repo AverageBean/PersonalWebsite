@@ -1,6 +1,6 @@
 # Phase 1 Normal-Cluster Bumps — Test Summary
 
-**Date:** 2026-04-17T19:11:02.444Z
+**Date:** 2026-04-17T20:29:45.131Z
 **Algorithm change:** Single global UV frame → per-cluster UV frames (20° BFS threshold)
 
 ## Test Models

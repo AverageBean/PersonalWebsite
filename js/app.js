@@ -83,6 +83,8 @@ document.addEventListener("DOMContentLoaded", () => {
   const textureApplyLabel = document.getElementById("textureApplyLabel");
   const textureApplySpinner = document.getElementById("textureApplySpinner");
   const textureResetBtn = document.getElementById("textureResetBtn");
+  const textureRegionList = document.getElementById("textureRegionList");
+  const textureRegionRows = document.getElementById("textureRegionRows");
 
   // ── Tab switching ──────────────────────────────────────────────────────
   const tabBtns = document.querySelectorAll('.tab-btn');
@@ -250,7 +252,9 @@ document.addEventListener("DOMContentLoaded", () => {
   let faceCentroids = null;
   let faceNormalsCache = null;
   let textureHighlightMesh = null;
-  let preTextureBaseGeometry = null;
+  let originalBaseGeometry = null;   // geometry at file-load time; never mutated
+  let textureLayerRegistry = [];     // Array<{id,type,faceSet,params,label}>
+  let textureLayerCounter = 0;
   let textureRaycaster = new THREE.Raycaster();
   let textureMouse = new THREE.Vector2();
 
@@ -524,10 +528,8 @@ document.addEventListener("DOMContentLoaded", () => {
       textureToggleBtn.classList.remove("is-active");
       textureToggleBtn.setAttribute("aria-pressed", "false");
     }
-    if (preTextureBaseGeometry) {
-      preTextureBaseGeometry.dispose();
-      preTextureBaseGeometry = null;
-    }
+    // textureLayerRegistry and originalBaseGeometry are NOT cleared here —
+    // they persist across rebuilds and are only reset on new file load.
     updateExportUiState();
     updateTransformRowState();
   }
@@ -1796,6 +1798,10 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     baseGeometry = preparedBase;
+    if (originalBaseGeometry) originalBaseGeometry.dispose();
+    originalBaseGeometry = preparedBase.clone();
+    textureLayerRegistry = [];
+    textureLayerCounter = 0;
     currentFileName = fileName;
     scaleX = scaleY = scaleZ = 1.0;  // reset scale for every new file load
     bboxOverlayActive = false;
@@ -2195,6 +2201,10 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     baseGeometry = preparedBase;
+    if (originalBaseGeometry) originalBaseGeometry.dispose();
+    originalBaseGeometry = preparedBase.clone();
+    textureLayerRegistry = [];
+    textureLayerCounter = 0;
     currentFileName = fileName;
     scaleX = scaleY = scaleZ = 1.0;
     bboxOverlayActive = false;
@@ -2827,34 +2837,27 @@ document.addEventListener("DOMContentLoaded", () => {
            (a0 <=  EPS && a1 <=  EPS && a2 <=  EPS);
   }
 
-  // ─── Hemispherical bumps ────────────────────────────────────────────────
+  // ─── Hemispherical bumps (pure) ────────────────────────────────────────
   //
   // Algorithm (triplanar global grid):
   //  1. Build per-face data array (v0/v1/v2/normal/centroid).
   //  2. Compute world-space AABB of all selected faces.
-  //  3. Cast three axis-aligned grids (XZ for Y-faces, YZ for X-faces, XY for Z-faces)
-  //     at step = spacing.  Each grid finds the nearest selected face using 2D
-  //     projected distance in its own plane, then projects the candidate onto that
-  //     face's 3D plane and runs a barycentric containment test.
-  //     Accepted candidates carry weight = |n.axis|^4 for their grid axis.
-  //  4. Sort candidates by weight descending; greedily accept, skipping any candidate
-  //     within spacing/2 of an already-accepted site (deduplication).
-  //  5. Place hemisphere at each accepted site using the face's own normal.
+  //  3. Cast three axis-aligned grids (XZ/YZ/XY) at step = spacing. Each grid
+  //     finds the nearest selected face in 2D projection and tests containment.
+  //     Candidates carry weight = |n.axis|^4.
+  //  4. Sort by weight desc; greedily accept, skipping within spacing/2 of accepted.
+  //  5. Place hemisphere at each accepted site along the face's own normal.
   //
-  function addHemisphericBumps(spacing, radius) {
-    if (!currentFillMesh || selectedFaceIndices.size === 0) {
-      setStatus("No faces selected for bumps.");
-      return false;
-    }
-
+  // Returns {geom, count} on success or {error: string} on failure.
+  // Pure: no globals read/written except THREE and MAX_TRIANGLES constants.
+  //
+  function computeBumpGeometry(srcGeom, faceSet, spacing, radius) {
     const MAX_BUMPS = 2000;
-    const K = 4; // triplanar blend sharpness exponent
-    const renderGeom = currentFillMesh.geometry;
-    const position = renderGeom.getAttribute("position");
+    const K = 4;
+    const position = srcGeom.getAttribute("position");
 
-    // 1. Per-face data
     const faceData = [];
-    selectedFaceIndices.forEach(fIdx => {
+    faceSet.forEach(fIdx => {
       const i0 = fIdx * 3, i1 = fIdx * 3 + 1, i2 = fIdx * 3 + 2;
       const v0 = new THREE.Vector3(position.getX(i0), position.getY(i0), position.getZ(i0));
       const v1 = new THREE.Vector3(position.getX(i1), position.getY(i1), position.getZ(i1));
@@ -2866,7 +2869,6 @@ document.addEventListener("DOMContentLoaded", () => {
       faceData.push({ v0, v1, v2, normal, centroid });
     });
 
-    // 2. AABB of all selected faces
     let xMin = Infinity, xMax = -Infinity;
     let yMin = Infinity, yMax = -Infinity;
     let zMin = Infinity, zMax = -Infinity;
@@ -2878,7 +2880,6 @@ document.addEventListener("DOMContentLoaded", () => {
       }
     }
 
-    // Project pt onto face plane; return candidate {position,normal,weight} or null.
     function projectAndTest(pt, face, weight) {
       const d = new THREE.Vector3().subVectors(pt, face.v0).dot(face.normal);
       const projected = pt.clone().addScaledVector(face.normal, -d);
@@ -2886,12 +2887,10 @@ document.addEventListener("DOMContentLoaded", () => {
       return { position: projected, normal: face.normal.clone(), weight };
     }
 
-    // 3. Three axis-aligned grids
     const EPS = spacing * 0.001;
     const raw = [];
 
-    // XZ grid — Y-facing surfaces (weight = |n.y|^K)
-    // Nearest face found by 2D distance in XZ projection; anchor y = face centroid y.
+    // XZ grid — Y-facing surfaces
     for (let x = Math.ceil(xMin / spacing) * spacing; x <= xMax + EPS; x += spacing) {
       for (let z = Math.ceil(zMin / spacing) * spacing; z <= zMax + EPS; z += spacing) {
         let nearest = null, minDSq = Infinity;
@@ -2907,8 +2906,7 @@ document.addEventListener("DOMContentLoaded", () => {
       }
     }
 
-    // YZ grid — X-facing surfaces (weight = |n.x|^K)
-    // Nearest face found by 2D distance in YZ projection; anchor x = face centroid x.
+    // YZ grid — X-facing surfaces
     for (let y = Math.ceil(yMin / spacing) * spacing; y <= yMax + EPS; y += spacing) {
       for (let z = Math.ceil(zMin / spacing) * spacing; z <= zMax + EPS; z += spacing) {
         let nearest = null, minDSq = Infinity;
@@ -2924,8 +2922,7 @@ document.addEventListener("DOMContentLoaded", () => {
       }
     }
 
-    // XY grid — Z-facing surfaces (weight = |n.z|^K)
-    // Nearest face found by 2D distance in XY projection; anchor z = face centroid z.
+    // XY grid — Z-facing surfaces
     for (let x = Math.ceil(xMin / spacing) * spacing; x <= xMax + EPS; x += spacing) {
       for (let y = Math.ceil(yMin / spacing) * spacing; y <= yMax + EPS; y += spacing) {
         let nearest = null, minDSq = Infinity;
@@ -2941,13 +2938,11 @@ document.addEventListener("DOMContentLoaded", () => {
       }
     }
 
-    // 3b. Centroid coverage pass — weight=-1 (lower than any grid candidate) so triplanar
-    //     grid bumps always place first; face centroids fill uncovered gaps only.
+    // Centroid pass — weight=-1 so grid candidates always place first
     for (const f of faceData) {
       raw.push({ position: f.centroid.clone(), normal: f.normal.clone(), weight: -1 });
     }
 
-    // 4. Deduplicate: sort by weight desc, greedily accept sites >= spacing/2 apart
     raw.sort((a, b) => b.weight - a.weight);
     const dedupDistSq = (spacing * 0.5) * (spacing * 0.5);
     const accepted = [];
@@ -2966,23 +2961,16 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     if (accepted.length === 0) {
-      setStatus("No valid bump positions found. Try selecting more faces or reducing spacing.");
-      return false;
+      return { error: "No valid bump positions found. Try selecting more faces or reducing spacing." };
     }
 
-    // 5. Triangle budget — SphereGeometry(r, 12, 6) → 144 tris/hemisphere
-    const baseTriCount = baseGeometry.index
-      ? baseGeometry.index.count / 3
-      : baseGeometry.getAttribute("position").count / 3;
+    // Budget: SphereGeometry(r, 12, 6) → 144 tris/hemisphere
+    const baseTriCount = Math.floor(position.count / 3);
     if (baseTriCount + accepted.length * 144 > MAX_TRIANGLES) {
-      setStatus(`Too many bumps — would exceed the ${(MAX_TRIANGLES / 1e6).toFixed(0)}M triangle limit. Reduce spacing or selection.`);
-      return false;
+      return { error: `Too many bumps — would exceed the ${(MAX_TRIANGLES / 1e6).toFixed(0)}M triangle limit. Reduce spacing or selection.` };
     }
 
-    // 6. Build and merge hemispheres
-    preTextureBaseGeometry = baseGeometry.clone();
-
-    const positionArrays = [renderGeom.getAttribute("position").array.slice()];
+    const positionArrays = [position.array.slice()];
     const yUp = new THREE.Vector3(0, 1, 0);
 
     for (let i = 0; i < accepted.length; i++) {
@@ -3007,51 +2995,31 @@ document.addEventListener("DOMContentLoaded", () => {
     const mergedGeom = new THREE.BufferGeometry();
     mergedGeom.setAttribute("position", new THREE.Float32BufferAttribute(allPos, 3));
 
-    // 7. Finalize
-    const prepared = prepareBaseGeometry(mergedGeom);
-    if (prepared !== mergedGeom) mergedGeom.dispose();
-    baseGeometry = prepared;
-
-    const savedPre = preTextureBaseGeometry;
-    clearTextureSelection();
-    rebuildModelFromSettings();
-    preTextureBaseGeometry = savedPre;
-    textureResetBtn.disabled = false;
-
-    setStatus(`Applied ${accepted.length} bumps — ${spacing}mm spacing, ${radius}mm radius.`);
-    return true;
+    return { geom: mergedGeom, count: accepted.length };
   }
 
-  // ─── Mesh weave displacement ────────────────────────────────────────────
+  // ─── Mesh weave displacement (pure) ────────────────────────────────────
   //
   // Algorithm:
-  //  1. Split currentFillMesh triangles into selected and unselected sets
-  //     using the explicit selectedFaceIndices membership (no proximity heuristic).
-  //  2. Adaptively subdivide each selected face until the longest edge ≤ cellSize/4.
-  //     Subdivision is per-face recursive (no crack-welding needed for texture).
-  //  3. For each selected face displace each vertex along the face normal by
+  //  1. Split srcGeom triangles into faceSet (selected) and remainder.
+  //  2. Adaptively subdivide each selected face until longest edge ≤ cellSize/4.
+  //  3. Displace each leaf vertex along face normal by
   //     height × triplanarMeshValue(v, normal, cellSize, strandWidth, 4).
-  //     Triplanar blends three axis-aligned projections weighted by |n.axis|^4 —
-  //     no per-face tangent frame needed, no cluster seam lines.
-  //  4. Concatenate displaced selected faces + untouched unselected faces.
-  //  5. Run prepareBaseGeometry → new baseGeometry.
+  //  4. Concatenate displaced selected + untouched unselected faces.
   //
-  function applyMeshWeaveDisplacement(height, cellSize, strandWidth) {
-    if (!currentFillMesh || selectedFaceIndices.size === 0) {
-      setStatus("No faces selected for weave.");
-      return false;
-    }
-
-    const renderGeom = currentFillMesh.geometry; // non-indexed
-    const position = renderGeom.getAttribute("position");
+  // Scans ALL selected faces for max edge length (no sampling cap) to guarantee
+  // the triangle budget estimate is accurate.
+  //
+  // Returns {geom, selCount} on success or {error: string} on failure.
+  // Pure: no globals read/written except THREE and MAX_TRIANGLES constants.
+  //
+  function computeWeaveGeometry(srcGeom, faceSet, height, cellSize, strandWidth) {
+    const position = srcGeom.getAttribute("position");
     const faceCount = Math.floor(position.count / 3);
     const subdivTarget = cellSize / 4;
 
-    // Scan ALL selected faces for the true maximum edge length.
-    // Sampling only a subset (old 50-face cap) underestimates subdivision depth
-    // and allows triangle counts to exceed MAX_TRIANGLES.
     let maxEdgeLen = 0;
-    for (const fIdx of selectedFaceIndices) {
+    for (const fIdx of faceSet) {
       const i0 = fIdx * 3, i1 = fIdx * 3 + 1, i2 = fIdx * 3 + 2;
       const sv0 = new THREE.Vector3(position.getX(i0), position.getY(i0), position.getZ(i0));
       const sv1 = new THREE.Vector3(position.getX(i1), position.getY(i1), position.getZ(i1));
@@ -3062,17 +3030,13 @@ document.addEventListener("DOMContentLoaded", () => {
       ? Math.min(5, Math.ceil(Math.log2(maxEdgeLen / subdivTarget)))
       : 0;
     const estimatedMultiplier = Math.pow(4, estimatedLevels);
-    if (selectedFaceIndices.size * estimatedMultiplier + faceCount > MAX_TRIANGLES) {
-      setStatus("Selection too large for weave — reduce selection or increase cell size.");
-      return false;
+    if (faceSet.size * estimatedMultiplier + faceCount > MAX_TRIANGLES) {
+      return { error: "Selection too large for weave — reduce selection or increase cell size." };
     }
 
-    // Pre-allocate typed arrays sized to the worst-case output.
-    // Since maxEdgeLen is the true max, selWriteIdx is guaranteed not to exceed
-    // maxSelectedFloats: every face subdivides at most estimatedMultiplier times.
-    const maxSelectedFloats = selectedFaceIndices.size * estimatedMultiplier * 9;
-    const maxUnselectedFloats = (faceCount - selectedFaceIndices.size) * 9;
-    const selectedPositions = new Float32Array(maxSelectedFloats);
+    const maxSelectedFloats   = faceSet.size * estimatedMultiplier * 9;
+    const maxUnselectedFloats = (faceCount - faceSet.size) * 9;
+    const selectedPositions   = new Float32Array(maxSelectedFloats);
     const unselectedPositions = new Float32Array(maxUnselectedFloats);
     let selWriteIdx = 0;
     let unselWriteIdx = 0;
@@ -3105,7 +3069,7 @@ document.addEventListener("DOMContentLoaded", () => {
       const v1 = new THREE.Vector3(position.getX(i1), position.getY(i1), position.getZ(i1));
       const v2 = new THREE.Vector3(position.getX(i2), position.getY(i2), position.getZ(i2));
 
-      if (selectedFaceIndices.has(f)) {
+      if (faceSet.has(f)) {
         const normal = new THREE.Vector3()
           .crossVectors(new THREE.Vector3().subVectors(v1, v0), new THREE.Vector3().subVectors(v2, v0))
           .normalize();
@@ -3124,23 +3088,112 @@ document.addEventListener("DOMContentLoaded", () => {
     const mergedGeom = new THREE.BufferGeometry();
     mergedGeom.setAttribute("position", new THREE.Float32BufferAttribute(allPos, 3));
 
-    preTextureBaseGeometry = baseGeometry.clone();
-    const prepared = prepareBaseGeometry(mergedGeom);
-    if (prepared !== mergedGeom) mergedGeom.dispose();
-    baseGeometry = prepared;
-
-    const selCount = selectedFaceIndices.size;
-    const savedPre = preTextureBaseGeometry;
-    clearTextureSelection();
-    rebuildModelFromSettings();
-    preTextureBaseGeometry = savedPre;
-    textureResetBtn.disabled = false;
-    setStatus(`Applied mesh weave to ${selCount} faces — ${height}mm height, ${cellSize}mm cell.`);
-    return true;
+    return { geom: mergedGeom, selCount: faceSet.size };
   }
 
-  // ─── Dispatcher ────────────────────────────────────────────────────────
+  // ─── Multi-region layer management ─────────────────────────────────────
 
+  function renderRegionList() {
+    if (!textureRegionList || !textureRegionRows) return;
+    textureRegionRows.innerHTML = "";
+    if (textureLayerRegistry.length === 0) {
+      textureRegionList.style.display = "none";
+      return;
+    }
+    textureRegionList.style.display = "";
+    textureLayerRegistry.forEach(layer => {
+      const row = document.createElement("div");
+      row.className = "texture-region-row";
+
+      const label = document.createElement("span");
+      label.className = "texture-region-label";
+      label.textContent = layer.label;
+
+      const removeBtn = document.createElement("button");
+      removeBtn.className = "texture-region-remove";
+      removeBtn.title = "Remove this region";
+      removeBtn.textContent = "✕";
+      removeBtn.addEventListener("click", () => removeTextureLayer(layer.id));
+
+      row.appendChild(label);
+      row.appendChild(removeBtn);
+      textureRegionRows.appendChild(row);
+    });
+  }
+
+  function removeTextureLayer(layerId) {
+    const idx = textureLayerRegistry.findIndex(l => l.id === layerId);
+    if (idx === -1) return;
+    textureLayerRegistry.splice(idx, 1);
+
+    textureApplyBtn.disabled = true;
+    if (textureApplySpinner) textureApplySpinner.hidden = false;
+    setStatus("Removing texture region…");
+
+    setTimeout(() => {
+      try {
+        recomputeAllLayers();
+        const wasPanelVisible = texturePanelVisible;
+        clearTextureSelection();
+        rebuildModelFromSettings();
+        if (wasPanelVisible) {
+          texturePanelVisible = true;
+          if (texturePanel) texturePanel.style.display = "";
+          if (textureToggleBtn) {
+            textureToggleBtn.classList.add("is-active");
+            textureToggleBtn.setAttribute("aria-pressed", "true");
+          }
+          if (currentFillMesh) initTexturePanel();
+        }
+        renderRegionList();
+        setStatus(textureLayerRegistry.length === 0
+          ? "All texture regions cleared."
+          : `Removed region — ${textureLayerRegistry.length} region(s) remaining.`);
+      } catch (e) {
+        console.error("Error removing texture layer:", e);
+        setStatus("Failed to remove region — see console.");
+      } finally {
+        textureApplyBtn.disabled = false;
+        if (textureApplySpinner) textureApplySpinner.hidden = true;
+      }
+    }, 30);
+  }
+
+  // Replays all committed layers from originalBaseGeometry in order.
+  function recomputeAllLayers() {
+    let current = originalBaseGeometry.clone();
+
+    for (const layer of textureLayerRegistry) {
+      const nonIdx = current.toNonIndexed();
+      const faceCount = Math.floor(nonIdx.getAttribute("position").count / 3);
+      // Clamp face set to valid range — a layer saved against a larger (post-bump)
+      // geometry may contain indices beyond this geometry's face count.
+      const validFaceSet = layer.faceSet.size <= faceCount
+        ? layer.faceSet
+        : new Set([...layer.faceSet].filter(i => i < faceCount));
+      const result = layer.type === "bumps"
+        ? computeBumpGeometry(nonIdx, validFaceSet, layer.params.spacing, layer.params.radius)
+        : computeWeaveGeometry(nonIdx, validFaceSet, layer.params.height, layer.params.cellSize, layer.params.strandWidth);
+      nonIdx.dispose();
+      current.dispose();
+
+      if (!result || result.error) {
+        // Layer is no longer valid — stop here and use original
+        current = originalBaseGeometry.clone();
+        break;
+      }
+      const prepared = prepareBaseGeometry(result.geom);
+      if (prepared !== result.geom) result.geom.dispose();
+      current = prepared;
+    }
+
+    if (baseGeometry) baseGeometry.dispose();
+    baseGeometry = current;
+    textureResetBtn.disabled = textureLayerRegistry.length === 0;
+  }
+
+  // Commits current selection as a new texture layer and updates the geometry.
+  // Panel stays open so the user can select the next region immediately.
   function applyTextureToGeometry() {
     if (selectedFaceIndices.size === 0) {
       setStatus("No faces selected — click a surface region first.");
@@ -3148,30 +3201,76 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     const preset = texturePresetSelect.value;
-    let success = false;
+    const faceSetSnapshot = new Set(selectedFaceIndices);
+
+    // Compute against the current accumulated geometry (non-indexed form).
+    // Face indices in faceSetSnapshot are relative to this non-indexed geometry.
+    const srcGeom = baseGeometry.toNonIndexed();
+    let result, layerType, layerParams, statusMsg;
 
     if (preset === "bumps") {
-      success = addHemisphericBumps(
-        parseFloat(bumpSpacingInput.value),
-        parseFloat(bumpRadiusInput.value)
-      );
-    } else if (preset === "mesh") {
-      success = applyMeshWeaveDisplacement(
-        parseFloat(meshHeightInput.value),
-        parseFloat(meshCellInput.value),
-        parseFloat(meshStrandInput.value)
-      );
-    }
-
-    if (success) {
-      // Close panel — user re-opens to apply another texture pass
-      texturePanelVisible = false;
-      if (texturePanel) texturePanel.style.display = "none";
-      if (textureToggleBtn) {
-        textureToggleBtn.classList.remove("is-active");
-        textureToggleBtn.setAttribute("aria-pressed", "false");
+      const spacing = parseFloat(bumpSpacingInput.value);
+      const radius  = parseFloat(bumpRadiusInput.value);
+      result      = computeBumpGeometry(srcGeom, faceSetSnapshot, spacing, radius);
+      layerType   = "bumps";
+      layerParams = { spacing, radius };
+      if (result && !result.error) {
+        statusMsg = `Applied ${result.count} bumps — ${spacing}mm spacing, ${radius}mm radius.`;
+      }
+    } else {
+      const height      = parseFloat(meshHeightInput.value);
+      const cellSize    = parseFloat(meshCellInput.value);
+      const strandWidth = parseFloat(meshStrandInput.value);
+      result      = computeWeaveGeometry(srcGeom, faceSetSnapshot, height, cellSize, strandWidth);
+      layerType   = "mesh";
+      layerParams = { height, cellSize, strandWidth };
+      if (result && !result.error) {
+        statusMsg = `Applied mesh weave to ${result.selCount} faces — ${height}mm height, ${cellSize}mm cell.`;
       }
     }
+
+    srcGeom.dispose();
+
+    if (!result || result.error) {
+      setStatus(result ? result.error : "Texture apply failed.");
+      return;
+    }
+
+    // Commit: finalize geometry and push layer record
+    const prepared = prepareBaseGeometry(result.geom);
+    if (prepared !== result.geom) result.geom.dispose();
+    if (baseGeometry) baseGeometry.dispose();
+    baseGeometry = prepared;
+
+    textureLayerRegistry.push({
+      id:      ++textureLayerCounter,
+      type:    layerType,
+      faceSet: faceSetSnapshot,
+      params:  layerParams,
+      label:   layerType === "bumps"
+        ? `Bumps — ${faceSetSnapshot.size} faces`
+        : `Weave — ${faceSetSnapshot.size} faces`,
+    });
+
+    textureResetBtn.disabled = false;
+
+    // Preserve panel visibility across rebuildModelFromSettings (which calls
+    // clearCurrentModel and sets texturePanelVisible = false internally).
+    const wasPanelVisible = texturePanelVisible;
+    clearTextureSelection();
+    rebuildModelFromSettings();
+    if (wasPanelVisible) {
+      texturePanelVisible = true;
+      if (texturePanel) texturePanel.style.display = "";
+      if (textureToggleBtn) {
+        textureToggleBtn.classList.add("is-active");
+        textureToggleBtn.setAttribute("aria-pressed", "true");
+      }
+      if (currentFillMesh) initTexturePanel();
+    }
+
+    renderRegionList();
+    setStatus(statusMsg);
   }
 
   function initTexturePanel() {
@@ -3435,14 +3534,26 @@ document.addEventListener("DOMContentLoaded", () => {
 
   if (textureResetBtn) {
     textureResetBtn.addEventListener("click", () => {
-      if (preTextureBaseGeometry) {
-        baseGeometry.dispose();
-        baseGeometry = preTextureBaseGeometry.clone();
-        preTextureBaseGeometry = null;
-        textureResetBtn.disabled = true;
-        rebuildModelFromSettings();
-        setStatus("Texture reset to original geometry.");
+      if (!originalBaseGeometry || textureLayerRegistry.length === 0) return;
+      textureLayerRegistry = [];
+      textureLayerCounter = 0;
+      if (baseGeometry) baseGeometry.dispose();
+      baseGeometry = originalBaseGeometry.clone();
+      textureResetBtn.disabled = true;
+      const wasPanelVisible = texturePanelVisible;
+      clearTextureSelection();
+      rebuildModelFromSettings();
+      if (wasPanelVisible) {
+        texturePanelVisible = true;
+        if (texturePanel) texturePanel.style.display = "";
+        if (textureToggleBtn) {
+          textureToggleBtn.classList.add("is-active");
+          textureToggleBtn.setAttribute("aria-pressed", "true");
+        }
+        if (currentFillMesh) initTexturePanel();
       }
+      renderRegionList();
+      setStatus("All texture regions cleared.");
     });
   }
 

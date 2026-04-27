@@ -1093,7 +1093,7 @@ def detect_box_holes(
 
 
 SLOT_MIN_WIDTH = 1.0   # mm — minimum plausible slot width
-SLOT_MAX_WIDTH = 25.0  # mm — maximum plausible slot width
+SLOT_MAX_WIDTH = 15.0  # mm — rejects wide false-positives from draft-angled outer walls
 # Minimum angular coverage (radians) to classify a cylinder cluster as a full hole
 # vs. a semicircular oblong end.  270° threshold: full holes span ~360°,
 # oblong ends span ~180°.
@@ -1552,6 +1552,9 @@ def apply_internal_slot_cuts(
         part_hi     = part_hi_map[perp_idx]
 
         for seg_min, seg_max in slot["segments"]:
+            if seg_max - seg_min < 1.0:   # skip degenerate zero-length segments
+                continue
+
             # --- Classify each segment end BEFORE cutting ---
             # Determine end-cap treatment: rounded cylinder, box extension
             # (T-junction), or nothing (part edge).
@@ -1662,6 +1665,148 @@ def apply_internal_slot_cuts(
 
     print(f"[parametric] applied {n_cuts} oblong cut(s)", flush=True)
     return solid
+
+
+def detect_inner_pocket(face_centers, face_normals, fc_min, fc_max,
+                        cap_axis_idx, la, lb, interior_planes, part_lo, part_hi):
+    """
+    Detect a rectangular inner pocket cavity in a hollow-shell part.
+
+    Finds inward-facing wall face pairs (normals pointing toward the box
+    centre) in both lateral axes (la, lb) plus an interior floor plane.
+    Returns a list with one pocket dict, or empty list when no cavity is
+    found.  Empty list → part is solid; no CSG subtraction is applied.
+
+    Pocket dict keys: la_min, la_max, lb_min, lb_max, floor_pos, open_pos,
+                      open_toward_hi
+    """
+    INWARD_COS_MIN       = 0.75   # |normal_lateral| to count as inward-facing
+    WALL_INSET_MIN       = 1.0    # mm — inner wall must be this far inside outer bounds
+    WALL_PERP_SPAN_RATIO = 0.30   # inner wall must span ≥ this fraction of perp. dim.
+    MIN_WALL_FACES       = 15     # faces per wall
+    CAVITY_MIN_VOL       = 300.0  # mm³
+    CAP_NORMAL_MIN       = 0.85
+
+    box_mid_la = float((fc_min[la] + fc_max[la]) / 2.0)
+    box_mid_lb = float((fc_min[lb] + fc_max[lb]) / 2.0)
+    full_la    = float(fc_max[la] - fc_min[la])
+    full_lb    = float(fc_max[lb] - fc_min[lb])
+
+    # ── Pass 1: find the interior floor FIRST ────────────────────────────────
+    # The floor is the most-populated interior horizontal plane.  We locate it
+    # before searching for lateral walls so the wall search can be restricted to
+    # only the Z-band that is actually hollow (above or below the ledge), which
+    # prevents deep base features (guide rails, cable channels) from drowning
+    # out the true cavity walls in the face-count average.
+    best_floor = None
+    for ip in interior_planes:
+        if best_floor is None or ip["inliers"] > best_floor["inliers"]:
+            best_floor = ip
+
+    if best_floor is not None:
+        floor_pos = best_floor["pos"]
+    else:
+        n_cap   = face_normals[:, cap_axis_idx]
+        floor_m = ((n_cap > CAP_NORMAL_MIN) &
+                   (face_centers[:, cap_axis_idx] > part_lo + 0.5) &
+                   (face_centers[:, cap_axis_idx] < part_hi - 0.5))
+        if floor_m.sum() < MIN_WALL_FACES:
+            print("[parametric] pocket detect: no interior floor — no pocket",
+                  flush=True)
+            return []
+        floor_pos = float(np.median(face_centers[floor_m, cap_axis_idx]))
+
+    # ── Pass 2: find lateral walls restricted to the Z-band of each direction ─
+    # For an upward-opening cavity: search faces with cap > floor_pos.
+    # For a downward-opening cavity: search faces with cap < floor_pos.
+    # This ensures guide-rail / base features below the ledge cannot mask the
+    # shallower main-cavity walls above it, and vice-versa.
+    def find_wall(axis_idx, side, box_mid, perp_full_span, cap_lo, cap_hi):
+        opp = lb if axis_idx == la else la
+        base = ((face_centers[:, cap_axis_idx] > cap_lo) &
+                (face_centers[:, cap_axis_idx] < cap_hi))
+        if side == +1:
+            mask = base & (face_normals[:, axis_idx] < -INWARD_COS_MIN) & \
+                          (face_centers[:, axis_idx] > box_mid)
+        else:
+            mask = base & (face_normals[:, axis_idx] > INWARD_COS_MIN) & \
+                          (face_centers[:, axis_idx] < box_mid)
+        if mask.sum() < MIN_WALL_FACES:
+            return None, 0
+        pos_vals  = face_centers[mask, axis_idx]
+        # Use the mean of faces near the FAR end of the position distribution.
+        # Interior features (mounting posts, ribs) cluster at smaller insets and
+        # would bias a global mean toward the wrong position.
+        # Cap NEAR_WALL at 2.5 mm so posts that are only ~2.7 mm from the cavity
+        # wall are not swept into the average (tested against ESP35Box geometry).
+        pos_range = float(pos_vals.max() - pos_vals.min())
+        NEAR_WALL = min(2.5, max(1.5, 0.15 * pos_range))
+        if side == +1:
+            wall_vals = pos_vals[pos_vals >= pos_vals.max() - NEAR_WALL]
+        else:
+            wall_vals = pos_vals[pos_vals <= pos_vals.min() + NEAR_WALL]
+        if len(wall_vals) < 3:
+            return None, 0
+        pos      = float(wall_vals.mean())
+        opp_span = float(face_centers[mask, opp].max() -
+                         face_centers[mask, opp].min())
+        if opp_span < WALL_PERP_SPAN_RATIO * perp_full_span:
+            return None, 0
+        return pos, int(mask.sum())
+
+    # ── Pass 3: build one pocket per open-direction that has 4 valid walls ───
+    pockets = []
+    for open_hi in (True, False):
+        cap_lo = floor_pos if open_hi else part_lo
+        cap_hi = part_hi   if open_hi else floor_pos
+
+        la_pos, la_pos_n = find_wall(la, +1, box_mid_la, full_lb, cap_lo, cap_hi)
+        la_neg, la_neg_n = find_wall(la, -1, box_mid_la, full_lb, cap_lo, cap_hi)
+        lb_pos, lb_pos_n = find_wall(lb, +1, box_mid_lb, full_la, cap_lo, cap_hi)
+        lb_neg, lb_neg_n = find_wall(lb, -1, box_mid_lb, full_la, cap_lo, cap_hi)
+
+        n_walls = sum(1 for w in [la_pos, la_neg, lb_pos, lb_neg] if w is not None)
+        if n_walls < 4:
+            print(f"[parametric] pocket detect ({'hi' if open_hi else 'lo'}): "
+                  f"{n_walls}/4 inner walls — skip", flush=True)
+            continue
+
+        insets = [
+            float(fc_max[la]) - la_pos,
+            la_neg - float(fc_min[la]),
+            float(fc_max[lb]) - lb_pos,
+            lb_neg - float(fc_min[lb]),
+        ]
+        if min(insets) < WALL_INSET_MIN:
+            print(f"[parametric] pocket detect ({'hi' if open_hi else 'lo'}): "
+                  f"min inset {min(insets):.2f}mm < {WALL_INSET_MIN}mm — skip",
+                  flush=True)
+            continue
+
+        open_pos = part_hi if open_hi else part_lo
+        depth    = abs(open_pos - floor_pos)
+        la_span  = la_pos - la_neg
+        lb_span  = lb_pos - lb_neg
+        volume   = la_span * lb_span * depth
+        if volume < CAVITY_MIN_VOL:
+            continue
+
+        print(
+            f"[parametric] inner pocket ({'hi' if open_hi else 'lo'}): "
+            f"la=[{la_neg:.1f},{la_pos:.1f}] lb=[{lb_neg:.1f},{lb_pos:.1f}] "
+            f"floor={floor_pos:.2f}mm depth={depth:.1f}mm vol~{volume:.0f}mm³",
+            flush=True,
+        )
+        pockets.append({
+            "la_min": la_neg, "la_max": la_pos,
+            "lb_min": lb_neg, "lb_max": lb_pos,
+            "floor_pos": floor_pos, "open_pos": open_pos,
+            "open_toward_hi": open_hi,
+        })
+
+    if not pockets:
+        print("[parametric] pocket detect: no valid pockets found", flush=True)
+    return pockets
 
 
 def build_box_solid(ext_cyls, int_cyls, planes, face_centers, face_normals, used_after_planes,
@@ -1806,6 +1951,163 @@ def build_box_solid(ext_cyls, int_cyls, planes, face_centers, face_normals, used
             + ", ".join(f"pos={ip['pos']:.2f}mm ({ip['inliers']} faces)" for ip in interior_planes),
             flush=True,
         )
+
+    # ── Phase D: inner pocket cut for hollow-shell parts ─────────────────
+    # Detect 4 inward-facing wall pairs + interior floor and subtract the
+    # rectangular cavity from the solid.  Handles electronics enclosures
+    # and other hollow-shell geometries not covered by the slot-cut path.
+    inner_pockets = detect_inner_pocket(
+        face_centers, face_normals, fc_min, fc_max,
+        cap_axis_idx, la, lb, interior_planes, part_lo, part_hi,
+    )
+
+    for pocket in inner_pockets:
+        pocket_origin = np.zeros(3)
+        pocket_size   = np.zeros(3)
+        pocket_origin[la] = pocket["la_min"]
+        pocket_size[la]   = pocket["la_max"] - pocket["la_min"]
+        pocket_origin[lb] = pocket["lb_min"]
+        pocket_size[lb]   = pocket["lb_max"] - pocket["lb_min"]
+        if pocket["open_toward_hi"]:
+            pocket_origin[cap_axis_idx] = pocket["floor_pos"]
+            pocket_size[cap_axis_idx]   = (pocket["open_pos"] - pocket["floor_pos"]
+                                           + HOLE_CUT_MARGIN)
+        else:
+            pocket_origin[cap_axis_idx] = pocket["open_pos"] - HOLE_CUT_MARGIN
+            pocket_size[cap_axis_idx]   = (pocket["floor_pos"] - pocket["open_pos"]
+                                           + HOLE_CUT_MARGIN)
+        if np.any(pocket_size <= 0):
+            print(f"[parametric] pocket cut: degenerate size — skip", flush=True)
+            continue
+        try:
+            pocket_solid = Part.makeBox(
+                float(pocket_size[0]), float(pocket_size[1]), float(pocket_size[2]),
+                fv(pocket_origin),
+            )
+            solid = solid.cut(pocket_solid)
+            print(
+                f"[parametric] pocket cut: "
+                f"{pocket_size[la]:.1f}x{pocket_size[lb]:.1f}x{pocket_size[cap_axis_idx]:.1f}mm "
+                f"@ la={pocket_origin[la]:.1f} lb={pocket_origin[lb]:.1f}",
+                flush=True,
+            )
+        except Exception as exc:
+            print(f"[parametric] pocket cut failed: {exc}", flush=True)
+
+    # After pocket cut, fuse convex posts that lie inside the cavity back
+    # into the solid (they were removed by the rectangular pocket cut).
+    for pocket in inner_pockets:
+        for post in circle_posts:
+            if not (pocket["la_min"] <= post["center_la"] <= pocket["la_max"] and
+                    pocket["lb_min"] <= post["center_lb"] <= pocket["lb_max"]):
+                continue
+            if pocket["open_toward_hi"]:
+                post_lo = max(float(post.get("depth_min", pocket["floor_pos"])),
+                              pocket["floor_pos"])
+                post_hi_v = min(float(post.get("depth_max", pocket["open_pos"])),
+                                pocket["open_pos"])
+            else:
+                post_lo = max(float(post.get("depth_min", pocket["open_pos"])),
+                              pocket["open_pos"])
+                post_hi_v = min(float(post.get("depth_max", pocket["floor_pos"])),
+                                pocket["floor_pos"])
+            post_h = post_hi_v - post_lo
+            if post_h <= 0.1:
+                continue
+            cyl_base = np.zeros(3)
+            cyl_base[la]           = post["center_la"]
+            cyl_base[lb]           = post["center_lb"]
+            cyl_base[cap_axis_idx] = post_lo
+            try:
+                post_cyl = Part.makeCylinder(
+                    post["radius"], post_h, fv(cyl_base), fv(cap_axis_v),
+                )
+                solid = solid.fuse(post_cyl)
+                print(
+                    f"[parametric] post fused: r={post['radius']:.2f}mm "
+                    f"center=({post['center_la']:+.1f},{post['center_lb']:+.1f}) "
+                    f"h={post_h:.1f}mm",
+                    flush=True,
+                )
+            except Exception as exc:
+                print(f"[parametric] post fuse failed: {exc}", flush=True)
+
+    # ── Phase D.5: detect base channels via cross-section analysis ────────
+    # Slice the STL at a Z level inside the base (below the pocket floor) and
+    # find enclosed loops that represent channels / guide rails carved into the
+    # base material but NOT covered by the main pocket cut above.
+    if inner_pockets and mesh_triangles is not None and mesh_triangles.shape[0] > 0:
+        floor_pos_d5 = inner_pockets[0]["floor_pos"]
+        z_sample     = 0.5 * (part_lo + floor_pos_d5)   # mid-base level
+        try:
+            import trimesh as _trimesh
+            _base_mesh = _trimesh.Trimesh(
+                vertices=mesh_triangles.reshape(-1, 3),
+                faces=np.arange(mesh_triangles.shape[0] * 3).reshape(-1, 3),
+                process=False,
+            )
+            cap_normal_v3 = [0.0, 0.0, 0.0]
+            cap_normal_v3[cap_axis_idx] = 1.0
+            _section = _base_mesh.section(
+                plane_origin=[0.0, 0.0, z_sample] if cap_axis_idx == 2 else
+                             ([0.0, z_sample, 0.0] if cap_axis_idx == 1 else [z_sample, 0.0, 0.0]),
+                plane_normal=cap_normal_v3,
+            )
+            if _section is not None:
+                _path2d, _T = _section.to_planar()
+                # _path2d coords are (u,v); recover model (la,lb) via T
+                # For standard orientation (cap=Z), u≈X, v≈Y — verified by
+                # checking that the largest loop bounds match the known box size.
+                _loops = sorted(_path2d.polygons_closed,
+                                key=lambda p: p.area, reverse=True)
+                # Largest loop = outer box outline; skip it.
+                # Any other loop with area > 50 mm² is a base channel.
+                _pocket_la  = (inner_pockets[0]["la_min"], inner_pockets[0]["la_max"])
+                _pocket_lb  = (inner_pockets[0]["lb_min"], inner_pockets[0]["lb_max"])
+                for _loop in _loops[1:]:
+                    _area = _loop.area
+                    if _area < 50.0:
+                        continue
+                    _b     = _loop.bounds          # [xmin,ymin,xmax,ymax]
+                    _ch_la_min = float(_b[0])
+                    _ch_la_max = float(_b[2])
+                    _ch_lb_min = float(_b[1])
+                    _ch_lb_max = float(_b[3])
+                    # Skip loops whose footprint fully contains the main pocket
+                    # (that would be the pocket itself projected downward).
+                    if (_ch_la_min < _pocket_la[0] - 1.0 and
+                            _ch_la_max > _pocket_la[1] + 1.0 and
+                            _ch_lb_min < _pocket_lb[0] - 1.0 and
+                            _ch_lb_max > _pocket_lb[1] + 1.0):
+                        continue
+                    _ch_depth = abs(floor_pos_d5 - part_lo) + HOLE_CUT_MARGIN  # bottom margin only; top stops at floor_pos
+                    _ch_origin = np.zeros(3)
+                    _ch_origin[la]           = _ch_la_min
+                    _ch_origin[lb]           = _ch_lb_min
+                    _ch_origin[cap_axis_idx] = part_lo - HOLE_CUT_MARGIN
+                    _ch_size = np.zeros(3)
+                    _ch_size[la]           = _ch_la_max - _ch_la_min
+                    _ch_size[lb]           = _ch_lb_max - _ch_lb_min
+                    _ch_size[cap_axis_idx] = _ch_depth
+                    if np.any(_ch_size <= 0):
+                        continue
+                    print(
+                        f"[parametric] base channel: "
+                        f"{_ch_size[la]:.1f}x{_ch_size[lb]:.1f}x{_ch_size[cap_axis_idx]:.1f}mm "
+                        f"@ la={_ch_la_min:.1f} lb={_ch_lb_min:.1f} "
+                        f"area={_area:.0f}mm²",
+                        flush=True,
+                    )
+                    try:
+                        _ch_solid = Part.makeBox(
+                            float(_ch_size[0]), float(_ch_size[1]), float(_ch_size[2]),
+                            fv(_ch_origin),
+                        )
+                        solid = solid.cut(_ch_solid)
+                    except Exception as _exc:
+                        print(f"[parametric] base channel cut failed: {_exc}", flush=True)
+        except Exception as _exc:
+            print(f"[parametric] base channel detect failed: {_exc}", flush=True)
 
     # ── Phase C-0: ring pocket pairing (concentric hole + post) ─────────
     # Match convex posts to concave holes at the same XZ center.  A matching
@@ -2103,6 +2405,46 @@ def build_box_solid(ext_cyls, int_cyls, planes, face_centers, face_normals, used
                     already_detected = True
                     break
             if already_detected:
+                continue
+
+            # Suppress sprues whose centres fall outside the inner pocket
+            # footprint — these are outer-corner fillet faces, not real holes.
+            if inner_pockets:
+                pk = inner_pockets[0]
+                POCKET_MARGIN = 2.0  # mm tolerance for tapered pocket walls
+                in_pocket = (
+                    pk["la_min"] - POCKET_MARGIN <= cx <= pk["la_max"] + POCKET_MARGIN
+                    and pk["lb_min"] - POCKET_MARGIN <= cz <= pk["lb_max"] + POCKET_MARGIN
+                )
+                if not in_pocket:
+                    print(
+                        f"[parametric]   sprue cluster {sci+1}: "
+                        f"center ({cx:+.1f},{cz:+.1f}) outside pocket — skip",
+                        flush=True,
+                    )
+                    continue
+
+            # Suppress sprues near the 4 outer box corners. Corner-fillet
+            # arc clusters pass the pocket-footprint test when POCKET_MARGIN
+            # absorbs the small gap between inner-wall and outer-corner.
+            CORNER_PROXIMITY_MM = 3.5
+            outer_corners_2d = [
+                (float(fc_min[la]), float(fc_min[lb])),
+                (float(fc_min[la]), float(fc_max[lb])),
+                (float(fc_max[la]), float(fc_min[lb])),
+                (float(fc_max[la]), float(fc_max[lb])),
+            ]
+            min_corner_dist = min(
+                np.sqrt((cx - ocx) ** 2 + (cz - ocz) ** 2)
+                for (ocx, ocz) in outer_corners_2d
+            )
+            if min_corner_dist < CORNER_PROXIMITY_MM:
+                print(
+                    f"[parametric]   sprue cluster {sci+1}: "
+                    f"center ({cx:+.1f},{cz:+.1f}) near outer corner "
+                    f"(dist={min_corner_dist:.1f}mm) — skip",
+                    flush=True,
+                )
                 continue
 
             cap_coords = scl_pts[:, cap_axis_idx]

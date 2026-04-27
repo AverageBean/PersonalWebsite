@@ -85,6 +85,11 @@ document.addEventListener("DOMContentLoaded", () => {
   const textureResetBtn = document.getElementById("textureResetBtn");
   const textureRegionList = document.getElementById("textureRegionList");
   const textureRegionRows = document.getElementById("textureRegionRows");
+  const probeToggleBtn = document.getElementById("probeToggleBtn");
+  const coordProbeReadout = document.getElementById("coordProbeReadout");
+  const coordProbeCoords = coordProbeReadout ? coordProbeReadout.querySelector(".coord-probe-coords") : null;
+  const coordProbeNormal = coordProbeReadout ? coordProbeReadout.querySelector(".coord-probe-normal") : null;
+  const coordProbeCopy = coordProbeReadout ? coordProbeReadout.querySelector(".coord-probe-copy") : null;
 
   // ── Tab switching ──────────────────────────────────────────────────────
   const tabBtns = document.querySelectorAll('.tab-btn');
@@ -257,6 +262,9 @@ document.addEventListener("DOMContentLoaded", () => {
   let textureLayerCounter = 0;
   let textureRaycaster = new THREE.Raycaster();
   let textureMouse = new THREE.Vector2();
+  let probeRaycaster = new THREE.Raycaster();
+  let originalGeomCenter = new THREE.Vector3();
+  let probeActive = false;
 
   function resizeRenderer() {
     const width = viewerCanvas.clientWidth;
@@ -530,6 +538,13 @@ document.addEventListener("DOMContentLoaded", () => {
     }
     // textureLayerRegistry and originalBaseGeometry are NOT cleared here —
     // they persist across rebuilds and are only reset on new file load.
+    probeActive = false;
+    if (probeToggleBtn) {
+      probeToggleBtn.classList.remove("is-active");
+      probeToggleBtn.setAttribute("aria-pressed", "false");
+    }
+    if (coordProbeReadout) coordProbeReadout.hidden = true;
+    renderer.domElement.style.cursor = "";
     updateExportUiState();
     updateTransformRowState();
   }
@@ -547,6 +562,7 @@ document.addEventListener("DOMContentLoaded", () => {
     if (moldToggleBtn) moldToggleBtn.disabled = !hasModel;
     if (sliceToggleBtn) sliceToggleBtn.disabled = !hasModel;
     if (textureToggleBtn) textureToggleBtn.disabled = !hasModel;
+    if (probeToggleBtn) probeToggleBtn.disabled = !hasModel;
     if (!hasModel) {
       if (dimXInput) dimXInput.value = "";
       if (dimYInput) dimYInput.value = "";
@@ -783,6 +799,7 @@ document.addEventListener("DOMContentLoaded", () => {
     baseGeometry.applyMatrix4(bestMatrix);
     centerGeometryAtOrigin(baseGeometry);
     baseGeometry.computeBoundingBox();
+    originalGeomCenter.set(0, 0, 0); // geometry is now re-centered; probe coords are in new frame
 
     // Rotation changes the geometry axes, so per-axis scale no longer maps to
     // the original dimensions. Reset to 1× so the display is not misleading.
@@ -819,6 +836,7 @@ document.addEventListener("DOMContentLoaded", () => {
     baseGeometry.applyMatrix4(rotMatrix);
     centerGeometryAtOrigin(baseGeometry);
     baseGeometry.computeBoundingBox();
+    originalGeomCenter.set(0, 0, 0); // geometry is now re-centered; probe coords are in new frame
 
     scaleX = scaleY = scaleZ = 1.0;
     rebuildModelFromSettings();
@@ -1743,6 +1761,9 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     indexedGeometry.computeVertexNormals();
+    // Capture bbox center before centering so coordinate probe can reconstruct STL-space coords.
+    indexedGeometry.computeBoundingBox();
+    if (indexedGeometry.boundingBox) indexedGeometry.boundingBox.getCenter(originalGeomCenter);
     centerGeometryAtOrigin(indexedGeometry);
 
     return indexedGeometry;
@@ -3554,6 +3575,75 @@ document.addEventListener("DOMContentLoaded", () => {
       }
       renderRegionList();
       setStatus("All texture regions cleared.");
+    });
+  }
+
+  // ── Coordinate probe ─────────────────────────────────────────────────────
+
+  if (probeToggleBtn) {
+    probeToggleBtn.addEventListener("click", () => {
+      if (!currentFillMesh) return;
+      probeActive = !probeActive;
+      probeToggleBtn.setAttribute("aria-pressed", String(probeActive));
+      probeToggleBtn.classList.toggle("is-active", probeActive);
+      renderer.domElement.style.cursor = probeActive ? "crosshair" : "";
+      if (!probeActive && coordProbeReadout) coordProbeReadout.hidden = true;
+      setStatus(probeActive
+        ? "Coordinate probe active — click the model to read XYZ position."
+        : "Coordinate probe off.");
+    });
+  }
+
+  renderer.domElement.addEventListener("click", (e) => {
+    if (!probeActive || !currentFillMesh) return;
+
+    const rect = renderer.domElement.getBoundingClientRect();
+    const probeMouse = new THREE.Vector2(
+      ((e.clientX - rect.left) / rect.width) * 2 - 1,
+      -((e.clientY - rect.top) / rect.height) * 2 + 1
+    );
+
+    probeRaycaster.setFromCamera(probeMouse, camera);
+    const hits = probeRaycaster.intersectObject(currentFillMesh);
+
+    if (hits.length === 0) {
+      if (coordProbeReadout) coordProbeReadout.hidden = true;
+      return;
+    }
+
+    const hit = hits[0];
+
+    // Transform world-space hit point into geometry local space (undoes modelRoot scale + lift).
+    // Since modelRoot has no rotation baked in, local coords are in centered-STL space.
+    const localPt = currentModelRoot.worldToLocal(hit.point.clone());
+
+    // Add back the original bbox center to recover the original STL coordinate system.
+    const stlX = localPt.x + originalGeomCenter.x;
+    const stlY = localPt.y + originalGeomCenter.y;
+    const stlZ = localPt.z + originalGeomCenter.z;
+
+    // Face normal — local geometry space equals STL space when no rotation is applied.
+    const fn = hit.face.normal;
+
+    const fc = (v) => (v >= 0 ? " " : "") + v.toFixed(2);
+    const fn3 = (v) => (v >= 0 ? "+" : "") + v.toFixed(3);
+
+    const coordText = `X:${fc(stlX)}  Y:${fc(stlY)}  Z:${fc(stlZ)} mm`;
+    const normalText = `n: (${fn3(fn.x)}, ${fn3(fn.y)}, ${fn3(fn.z)})`;
+    const copyText = `X=${stlX.toFixed(2)} Y=${stlY.toFixed(2)} Z=${stlZ.toFixed(2)} n=(${fn.x.toFixed(3)},${fn.y.toFixed(3)},${fn.z.toFixed(3)})`;
+
+    if (coordProbeCoords) coordProbeCoords.textContent = coordText;
+    if (coordProbeNormal) coordProbeNormal.textContent = normalText;
+    if (coordProbeCopy) coordProbeCopy.dataset.payload = copyText;
+    if (coordProbeReadout) coordProbeReadout.hidden = false;
+  });
+
+  if (coordProbeCopy) {
+    coordProbeCopy.addEventListener("click", () => {
+      const text = coordProbeCopy.dataset.payload || "";
+      navigator.clipboard.writeText(text).catch(() => {});
+      coordProbeCopy.textContent = "Copied!";
+      setTimeout(() => { coordProbeCopy.textContent = "Copy"; }, 1400);
     });
   }
 

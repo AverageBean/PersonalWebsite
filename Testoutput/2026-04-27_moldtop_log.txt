@@ -1,0 +1,110 @@
+[parametric] loaded 12886 triangles
+[parametric] pre-filter: 5975 horiz (cyl), 1579 vert (plane), 5332 fillet/other
+[parametric] detecting planes …
+[parametric]   plane REJECTED (curved): n=[1. 0. 0.], spread=1.166 mm > 0.45 mm, candidates=256
+[parametric]   plane REJECTED (curved): n=[1. 0. 0.], spread=0.753 mm > 0.45 mm, candidates=48
+[parametric]   plane REJECTED (curved): n=[-1. -0. -0.], spread=0.753 mm > 0.45 mm, candidates=48
+[parametric]   plane REJECTED (curved): n=[-1. -0. -0.], spread=1.166 mm > 0.45 mm, candidates=256
+[parametric]   plane: n=[0. 1. 0.], d=-16.000, inliers=30 (0.2%)
+[parametric]   plane: n=[ 0. -1.  0.], d=3.000, inliers=690 (5.4%)
+[parametric]   plane: n=[ 0.002 -1.    -0.   ], d=5.983, inliers=2656 (20.6%)
+[parametric]   plane: n=[ 0. -1.  0.], d=7.000, inliers=96 (0.7%)
+[parametric]   plane REJECTED (curved): n=[0. 0. 1.], spread=1.166 mm > 0.45 mm, candidates=256
+[parametric]   plane: n=[ 0.012 -0.     1.   ], d=3.293, inliers=80 (0.6%)
+[parametric]   plane REJECTED (curved): n=[0. 0. 1.], spread=0.753 mm > 0.45 mm, candidates=48
+[parametric]   plane REJECTED (curved): n=[-0. -0. -1.], spread=0.753 mm > 0.45 mm, candidates=48
+[parametric]   plane: n=[ 0.013 -0.    -1.   ], d=3.310, inliers=79 (0.6%)
+[parametric]   plane REJECTED (curved): n=[-0. -0. -1.], spread=1.166 mm > 0.45 mm, candidates=256
+[parametric] detecting cylinders …
+[parametric]   cyl: r=24.31 mm, axis=[-0.204  0.975  0.087], inliers=861 (6.7%), INNER(hole)
+[parametric]   cyl: r=24.59 mm, axis=[ 0.158  0.985 -0.07 ], inliers=699 (5.4%), INNER(hole)
+[parametric]   cyl: r=25.01 mm, axis=[0.002 1.    0.026], inliers=299 (2.3%), INNER(hole)
+[parametric]   cyl: r=56.44 mm, axis=[-0.094 -0.076 -0.993], inliers=301 (2.3%), OUTER(body)
+C:\Users\berry\AppData\Roaming\Python\Python311\site-packages\pyransac3d\cylinder.py:77: RuntimeWarning: divide by zero encountered in scalar divide
+  ma = (P_rot[1, 1] - P_rot[0, 1]) / (P_rot[1, 0] - P_rot[0, 0])
+C:\Users\berry\AppData\Roaming\Python\Python311\site-packages\pyransac3d\cylinder.py:86: RuntimeWarning: invalid value encountered in scalar subtract
+  ma * mb * (P_rot[0, 1] - P_rot[2, 1])
+[parametric]   cyl: r=106.87 mm, axis=[ 0.2   -0.005 -0.98 ], inliers=135 (1.0%), OUTER(body)
+C:\Users\berry\AppData\Roaming\Python\Python311\site-packages\pyransac3d\cylinder.py:78: RuntimeWarning: divide by zero encountered in scalar divide
+  mb = (P_rot[2, 1] - P_rot[1, 1]) / (P_rot[2, 0] - P_rot[1, 0])
+C:\Users\berry\AppData\Roaming\Python\Python311\site-packages\pyransac3d\cylinder.py:85: RuntimeWarning: invalid value encountered in scalar divide
+  p_center_x = (
+[parametric]   cyl: r=24.85 mm, axis=[ 0.03  -0.863 -0.505], inliers=79 (0.6%), INNER(hole)
+[parametric]   cyl: r=25.02 mm, axis=[-0.    -0.957  0.289], inliers=49 (0.4%), INNER(hole)
+C:\Users\berry\AppData\Roaming\Python\Python311\site-packages\pyransac3d\cylinder.py:65: RuntimeWarning: invalid value encountered in divide
+  vecC = vecC / np.linalg.norm(vecC)
+[parametric]   cyl: r=321.53 mm, axis=[-0.675  0.029  0.738], inliers=34 (0.3%), INNER(hole)
+C:\Users\berry\AppData\Roaming\Python\Python311\site-packages\pyransac3d\cylinder.py:86: RuntimeWarning: invalid value encountered in scalar add
+  ma * mb * (P_rot[0, 1] - P_rot[2, 1])
+[parametric]   cyl: r=20.82 mm, axis=[0.126 0.25  0.96 ], inliers=34 (0.3%), OUTER(body)
+C:\Users\berry\AppData\Roaming\Python\Python311\site-packages\pyransac3d\cylinder.py:86: RuntimeWarning: invalid value encountered in scalar multiply
+  ma * mb * (P_rot[0, 1] - P_rot[2, 1])
+C:\Users\berry\AppData\Roaming\Python\Python311\site-packages\pyransac3d\cylinder.py:87: RuntimeWarning: invalid value encountered in scalar multiply
+  + mb * (P_rot[0, 0] + P_rot[1, 0])
+C:\Users\berry\AppData\Roaming\Python\Python311\site-packages\pyransac3d\cylinder.py:88: RuntimeWarning: invalid value encountered in scalar multiply
+  - ma * (P_rot[1, 0] + P_rot[2, 0])
+[parametric] detecting tori (fillets) …
+[parametric] torus detect: 5725 candidate fillet faces
+[parametric] torus clusters: ['inner_bottom', 'inner_top'] (rho_split=214.20, h_split=-0.02)
+[parametric]   torus (inner_bottom): R=69.18 mm, r=39.97 mm, inliers=299 (2.3%), OUTER(convex)
+[parametric]   cluster inner_top: implausible R=57.28, r=51.00
+[parametric] torus cleanup: 985 additional faces claimed
+[parametric] detecting spheres …
+[parametric]   sphere 1: r=30.64 mm, center=(+0.1,-12.5,+0.1), concave, inliers=4688
+[parametric]   sphere round 2: r=1079351283082679808.00 outside [0.5, 500], skip
+[parametric] coverage=93.9%  (9 cyl, 6 plane, 1 torus, 1 sphere)
+[parametric] box: 70.0×13.0×70.0 mm
+[parametric] corner detect: 4600 lateral unclaimed faces, box 2D: a=[-35.0,35.0] b=[-35.0,35.0], mid=(0.0,0.0), max_dim=70.0mm, r_limit=28.0mm
+[parametric]   corner (-1,-1): 12 faces (near=540, diag=1029)
+[parametric]   corner (-1,-1): r=2.48 mm, center=(-27.0, -27.0), limit=[1,28.0]mm
+[parametric]   corner (+1,-1): 12 faces (near=540, diag=1018)
+[parametric]   corner (+1,-1): r=2.48 mm, center=(27.0, -27.0), limit=[1,28.0]mm
+[parametric]   corner (-1,+1): 12 faces (near=540, diag=1025)
+[parametric]   corner (-1,+1): r=2.48 mm, center=(-27.0, 27.0), limit=[1,28.0]mm
+[parametric]   corner (+1,+1): 12 faces (near=540, diag=1018)
+[parametric]   corner (+1,+1): r=2.48 mm, center=(27.0, 27.0), limit=[1,28.0]mm
+[parametric] corner radius detected: 2.48 mm (4/4 corners)
+[parametric] applying corner fillets r=2.48 mm …
+[parametric] corner fillets applied (4 edges)
+[parametric] circle detect: 2872 unclaimed tight-lateral faces
+[parametric] circle detect: 14 face clusters
+[parametric]   cluster 1: CIRCLE r=24.82 mm, center=(-0.7,-0.1), arc=318°, depth=[3.67,12.67], inliers=198
+[parametric]   cluster 2: RANSAC axis misaligned, using 2D circle fit (r=2.48mm, residual=0.000mm)
+[parametric]   cluster 2: CIRCLE r=2.48 mm, center=(-27.0,-27.0), arc=346°, depth=[4.33,5.67], inliers=52
+[parametric]   cluster 3: CIRCLE r=2.48 mm, center=(-26.6,+27.2), arc=346°, depth=[4.33,5.67], inliers=34
+[parametric]   cluster 4: RANSAC axis misaligned, using 2D circle fit (r=2.48mm, residual=0.000mm)
+[parametric]   cluster 4: CIRCLE r=2.48 mm, center=(+27.0,-27.0), arc=346°, depth=[4.33,5.67], inliers=52
+[parametric]   cluster 5: 270 faces, (+23.7,-0.5), arc=215° < 270° — partial arc, skip
+[parametric]   cluster 6: 270 faces, (+18.5,-14.9), arc=215° < 270° — partial arc, skip
+[parametric]   cluster 7: 270 faces, (+19.1,+14.0), arc=215° < 270° — partial arc, skip
+[parametric]   cluster 8: 270 faces, (+5.6,-23.0), arc=215° < 270° — partial arc, skip
+[parametric]   cluster 9: 270 faces, (+6.6,+22.8), arc=215° < 270° — partial arc, skip
+[parametric]   cluster 10: 270 faces, (-9.6,-21.7), arc=215° < 270° — partial arc, skip
+[parametric]   cluster 11: 270 faces, (-8.6,+22.1), arc=215° < 270° — partial arc, skip
+[parametric]   cluster 12: 235 faces, (-20.4,-12.3), arc=210° < 270° — partial arc, skip
+[parametric]   cluster 13: 197 faces, (-19.3,+14.2), arc=205° < 270° — partial arc, skip
+[parametric]   cluster 14: CIRCLE r=2.48 mm, center=(+26.8,+27.4), arc=346°, depth=[4.33,5.67], inliers=34
+[parametric] cavity-floor candidates: pos=5.98mm (2656 faces), pos=7.00mm (96 faces)
+[parametric] pocket detect (hi): 0/4 inner walls — skip
+[parametric] inner pocket (lo): la=[-29.3,29.3] lb=[-29.3,29.3] floor=5.98mm depth=3.0mm vol~10250mm³
+[parametric] pocket cut: 58.7x58.6x3.5mm @ la=-29.3 lb=-29.3
+C:\Users\berry\WebstormProjects\PersonalWebsite\tools\convert-stl-to-step-parametric-with-freecad.py:2057: DeprecationWarning: DEPRECATED: replace `path.to_planar`->`path.to_2D), removal 1/1/2026
+  _path2d, _T = _section.to_planar()
+[parametric] base channel: 50.0x50.0x3.5mm @ la=-25.0 lb=-25.1 area=1963mm²
+[parametric] base channel: 40.0x40.0x3.5mm @ la=-20.0 lb=-20.1 area=1256mm²
+[parametric] ring pocket (partial-arc): outer_r=24.82, inner_r=23.77 (from 9 arcs), center=(-0.7,-0.1)
+[parametric] ring pocket cut (torus): R=23.77, r=1.74, center=(-0.7,-0.1), blind-floor(depth=3.0mm, plane@5.98)
+[parametric] circle hole cut: r=2.48 mm, center=(-27.0,-27.0), blind(depth=1.3mm)
+[parametric] circle hole cut: r=2.48 mm, center=(-26.6,+27.2), blind(depth=1.3mm)
+[parametric] circle hole cut: r=2.48 mm, center=(+27.0,-27.0), blind(depth=1.3mm)
+[parametric] circle hole cut: r=2.48 mm, center=(+26.8,+27.4), blind(depth=1.3mm)
+[parametric] sprue pass: 72 lateral faces above cap=7.0
+[parametric] sprue detected: r=2.99mm, center=(-24.0,+0.0), arc=318 deg, depth=[9.27,12.67]
+[parametric] sprue hole cut: r=2.99mm, through
+[parametric] slot detect axis=0: 0 left-wall planes, 0 right-wall planes
+[parametric] slot detect axis=2: 1 left-wall planes, 1 right-wall planes
+[parametric]   slot axis=2 pos=[-3.0,3.0] suppressed (matches circle at -0.7,-0.1 r=24.82)
+[parametric] applied 0 oblong cut(s)
+[parametric] box CSG solid: corner_r=2.48 mm, 5 circle hole(s)
+[parametric] using analytical solid
+C:\Users\berry\WebstormProjects\PersonalWebsite\Testoutput\2026-04-27_moldtop_debug.step

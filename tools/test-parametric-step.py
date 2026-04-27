@@ -77,6 +77,30 @@ TESTS = [
         "min_planes_in_step":    10,    # outer walls + slot walls + caps
         "min_cylinders_in_step": 10,    # corner fillets (4) + oblong end caps (8+)
     },
+    {
+        "stl": "ESP35Box.stl",
+        "description": "Phase D — hollow electronics enclosure (pocket + base-channel cuts)",
+        "expect_log": [
+            "detecting planes",
+            "box CSG",
+            "corner radius detected",
+            "corner fillets applied",
+            "inner pocket",
+            "pocket cut",
+            "base channel",
+            "analytical solid",
+        ],
+        "reject_log": [
+            "triangulated fallback",
+            "sprue hole cut",
+        ],
+        "expect_step": ["PLANE", "CYLINDRICAL_SURFACE"],
+        "reject_step": [],
+        "min_coverage": 0.50,
+        "vol_ratio_min": 0.90,
+        "vol_ratio_max": 1.10,
+        "max_mean_dev_mm": 1.0,
+    },
 ]
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -114,6 +138,25 @@ def count_step_entities(step_path, entity_name):
 def extract_coverage(stdout):
     m = re.search(r"coverage=(\d+\.\d+)%", stdout)
     return float(m.group(1)) / 100.0 if m else None
+
+def run_compare(stl_path, step_path):
+    """Run compare-step-to-stl.py and return (vol_ratio, mean_dev) or (None, None)."""
+    compare_script = os.path.join(REPO_ROOT, "tools", "compare-step-to-stl.py")
+    if not os.path.exists(compare_script):
+        return None, None
+    try:
+        result = subprocess.run(
+            [FREECAD_PY, compare_script, stl_path, step_path],
+            capture_output=True, text=True, timeout=120,
+        )
+        stdout = result.stdout
+        vol_m  = re.search(r"Volume ratio\s*:\s*([\d.]+)", stdout)
+        dev_m  = re.search(r"Symm mean dev\s*:\s*([\d.]+)", stdout)
+        vol    = float(vol_m.group(1)) if vol_m else None
+        dev    = float(dev_m.group(1)) if dev_m else None
+        return vol, dev
+    except Exception:
+        return None, None
 
 # ── Run tests ─────────────────────────────────────────────────────────────────
 
@@ -207,6 +250,22 @@ for t in TESTS:
             n_cyl >= t["min_cylinders_in_step"],
             f"STEP CYLINDRICAL_SURFACE count {n_cyl} >= {t['min_cylinders_in_step']}"
         )
+
+    # Geometry quality checks (volume ratio + mean deviation via compare script)
+    if ("vol_ratio_min" in t or "vol_ratio_max" in t or "max_mean_dev_mm" in t) \
+            and os.path.exists(out_path):
+        print("  Running geometry comparison …")
+        vol_ratio, mean_dev = run_compare(stl_path, out_path)
+        if vol_ratio is not None:
+            if "vol_ratio_min" in t:
+                passed &= check(vol_ratio >= t["vol_ratio_min"],
+                                f"vol ratio {vol_ratio:.4f} >= {t['vol_ratio_min']}")
+            if "vol_ratio_max" in t:
+                passed &= check(vol_ratio <= t["vol_ratio_max"],
+                                f"vol ratio {vol_ratio:.4f} <= {t['vol_ratio_max']}")
+        if mean_dev is not None and "max_mean_dev_mm" in t:
+            passed &= check(mean_dev <= t["max_mean_dev_mm"],
+                            f"mean dev {mean_dev:.3f} mm <= {t['max_mean_dev_mm']} mm")
 
     all_passed &= passed
     print(f"\n  Result: {'PASSED' if passed else 'FAILED'}")

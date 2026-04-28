@@ -1668,7 +1668,8 @@ def apply_internal_slot_cuts(
 
 
 def detect_inner_pocket(face_centers, face_normals, fc_min, fc_max,
-                        cap_axis_idx, la, lb, interior_planes, part_lo, part_hi):
+                        cap_axis_idx, la, lb, interior_planes, part_lo, part_hi,
+                        planes=None):
     """
     Detect a rectangular inner pocket cavity in a hollow-shell part.
 
@@ -1752,6 +1753,29 @@ def detect_inner_pocket(face_centers, face_normals, fc_min, fc_max,
                          face_centers[mask, opp].min())
         if opp_span < WALL_PERP_SPAN_RATIO * perp_full_span:
             return None, 0
+
+        # Reject curved walls: require a non-rejected planar surface at the
+        # detected wall position with the matching axis-aligned normal.
+        # When the cavity is cylindrical (round impression carved into a flat
+        # face), inward-facing face centres cluster near the curve's extremes
+        # and produce false 4-wall positions; the plane detector earlier
+        # rejected those positions as curved (spread > 0.45 mm), so absence
+        # of a corresponding accepted plane is the strongest available
+        # indicator that the wall is not flat.
+        if planes is not None:
+            WALL_PLANE_TOL = 1.5  # mm
+            matched = False
+            for p in planes:
+                n = p["normal"]
+                if abs(n[axis_idx]) < 0.9:
+                    continue
+                plane_pos = -p["d"] / n[axis_idx]
+                if abs(plane_pos - pos) < WALL_PLANE_TOL:
+                    matched = True
+                    break
+            if not matched:
+                return None, 0
+
         return pos, int(mask.sum())
 
     # ── Pass 3: build one pocket per open-direction that has 4 valid walls ───
@@ -1959,6 +1983,7 @@ def build_box_solid(ext_cyls, int_cyls, planes, face_centers, face_normals, used
     inner_pockets = detect_inner_pocket(
         face_centers, face_normals, fc_min, fc_max,
         cap_axis_idx, la, lb, interior_planes, part_lo, part_hi,
+        planes=planes,
     )
 
     for pocket in inner_pockets:
@@ -2036,7 +2061,14 @@ def build_box_solid(ext_cyls, int_cyls, planes, face_centers, face_normals, used
     # Slice the STL at a Z level inside the base (below the pocket floor) and
     # find enclosed loops that represent channels / guide rails carved into the
     # base material but NOT covered by the main pocket cut above.
-    if inner_pockets and mesh_triangles is not None and mesh_triangles.shape[0] > 0:
+    #
+    # Gated on `open_toward_hi == True`: base-channel detection assumes the
+    # cavity opens UPWARD with solid base below the floor.  For downward-
+    # opening cavities (e.g. mold-tops) the sample plane lands inside the
+    # cavity itself and traces internal features as false channels.
+    if (inner_pockets
+            and inner_pockets[0].get("open_toward_hi", True)
+            and mesh_triangles is not None and mesh_triangles.shape[0] > 0):
         floor_pos_d5 = inner_pockets[0]["floor_pos"]
         z_sample     = 0.5 * (part_lo + floor_pos_d5)   # mid-base level
         try:
@@ -2227,6 +2259,35 @@ def build_box_solid(ext_cyls, int_cyls, planes, face_centers, face_normals, used
                     cut_h  = (part_hi - floor_pos) + HOLE_CUT_MARGIN
                 kind = f"blind-floor(depth={min(dist_to_lo, dist_to_hi):.1f}mm, plane@{floor_pos:.2f})"
                 return cut_y0, cut_h, kind
+
+        # Boundary case (Phase D.5-2): when face-centre depth_span is near
+        # the through/blind threshold (face-centre extent may have missed
+        # the hole's true rim or floor), prefer a substantial interior
+        # plane whose footprint contains the hole as the cavity floor.
+        # Determines opening side from depth_min/max distance to part bounds:
+        # the side whose closest visible face is nearer to the part boundary
+        # is treated as the open side.  Catches small-radius blind holes
+        # (e.g. mold-top sprue r=2.99mm, span=3.4mm just over threshold
+        # 3.25mm, true depth bounded by cavity floor at 5.98mm) that are
+        # excluded from the radius-gated interior-plane lookup.
+        threshold = BLIND_HOLE_DEPTH_RATIO * part_h
+        SUBSTANTIAL_PLANE_INLIERS = 500   # cavity floor must be a real plane
+        if abs(depth_span - threshold) < 0.25 * threshold and interior_planes:
+            for ip in interior_planes:
+                if ip.get("inliers", 0) < SUBSTANTIAL_PLANE_INLIERS:
+                    continue
+                if not (ip["la_min"] <= ch["center_la"] <= ip["la_max"] and
+                        ip["lb_min"] <= ch["center_lb"] <= ip["lb_max"]):
+                    continue
+                floor_pos    = ip["pos"]
+                opens_from_hi = (part_hi - d_max) < (d_min - part_lo)
+                if opens_from_hi:
+                    cut_y0 = floor_pos
+                    cut_h  = (part_hi - floor_pos) + HOLE_CUT_MARGIN
+                else:
+                    cut_y0 = part_lo - HOLE_CUT_MARGIN
+                    cut_h  = (floor_pos - part_lo) + HOLE_CUT_MARGIN
+                return cut_y0, cut_h, f"blind-pocket(floor@{floor_pos:.2f})"
 
         # Default: face-centre depth classification (Phase B.5-1).
         if depth_span > BLIND_HOLE_DEPTH_RATIO * part_h:

@@ -284,6 +284,64 @@ document.addEventListener("DOMContentLoaded", () => {
     statusText.textContent = message;
   }
 
+  // Audio ping for long-running export completion. Lazy AudioContext, resumed
+  // on the export click so the deferred ping (fires minutes later, after the
+  // user-gesture window has expired) is still allowed by autoplay policies.
+  let pingAudioCtx = null;
+  function ensurePingAudioCtx() {
+    if (pingAudioCtx) return pingAudioCtx;
+    const Ctor = window.AudioContext || window.webkitAudioContext;
+    if (!Ctor) return null;
+    try { pingAudioCtx = new Ctor(); } catch (_) { return null; }
+    return pingAudioCtx;
+  }
+
+  function primePingAudio() {
+    const ctx = ensurePingAudioCtx();
+    if (ctx && ctx.state === "suspended") {
+      try { ctx.resume(); } catch (_) { /* ignore */ }
+    }
+  }
+
+  function playCompletionPing() {
+    const ctx = ensurePingAudioCtx();
+    if (!ctx) {
+      console.warn("[parametric ping] AudioContext unavailable");
+      return;
+    }
+    const playNow = () => {
+      try {
+        // 50 ms lookahead so the first scheduled time is comfortably in
+        // the future after the audio thread has caught up post-resume.
+        const t0 = ctx.currentTime + 0.05;
+        const tone = (freq, start, dur, peak) => {
+          const osc = ctx.createOscillator();
+          const g   = ctx.createGain();
+          osc.type = "sine";
+          osc.frequency.value = freq;
+          g.gain.setValueAtTime(0.0001, start);
+          g.gain.exponentialRampToValueAtTime(peak,   start + 0.015);
+          g.gain.exponentialRampToValueAtTime(0.0001, start + dur);
+          osc.connect(g).connect(ctx.destination);
+          osc.start(start);
+          osc.stop(start + dur + 0.05);
+        };
+        tone(880,  t0,         0.22, 0.30);   // A5
+        tone(1320, t0 + 0.22,  0.26, 0.30);   // E6
+      } catch (e) {
+        console.warn("[parametric ping] play error", e);
+      }
+    };
+    // resume() is async — chain the play call so oscillators are not
+    // scheduled before the audio thread is actually running.
+    const resumeP = ctx.state === "suspended"
+      ? ctx.resume()
+      : Promise.resolve();
+    Promise.resolve(resumeP)
+      .then(playNow)
+      .catch((e) => console.warn("[parametric ping] resume failed", e));
+  }
+
   function getFileExtension(fileName) {
     if (!fileName || typeof fileName !== "string") {
       return "";
@@ -2416,6 +2474,12 @@ document.addEventListener("DOMContentLoaded", () => {
       downloadExportButton.disabled = true;
     }
 
+    // Prime audio in the click's user-gesture window so the deferred
+    // completion ping (minutes later) is unblocked.
+    if (formatKey === "step-parametric") {
+      primePingAudio();
+    }
+
     try {
       const result = await createExportBlob(formatKey);
       // STEP returns {blob, meta}; all other formats return a Blob directly.
@@ -2461,6 +2525,9 @@ document.addEventListener("DOMContentLoaded", () => {
       if (isStepExport) {
         conversionSpinner.hidden = true;
         downloadExportButton.disabled = false;
+      }
+      if (formatKey === "step-parametric") {
+        playCompletionPing();
       }
     }
   }
@@ -2562,6 +2629,12 @@ document.addEventListener("DOMContentLoaded", () => {
       downloadCurrentModelExport();
     });
   }
+
+  // Unlock the AudioContext on the first user interaction anywhere on the
+  // page. Browsers gate audio on user activation; this guarantees the
+  // context is "running" well before the parametric STEP export finishes.
+  document.addEventListener("pointerdown", primePingAudio, { once: true, capture: true });
+  document.addEventListener("keydown",     primePingAudio, { once: true, capture: true });
 
   bindDimInput(dimXInput, "x");
   bindDimInput(dimYInput, "y");

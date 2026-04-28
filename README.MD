@@ -25,6 +25,7 @@ Interactive browser-based 3D model viewer powered by Three.js r128.
 - **Mold generator** — creates a two-part mold from any loaded model via FreeCAD CSG: configurable wall thickness, clearance offset, registration pins/holes (configurable tolerance), sprue channel, and adjustable split plane with live 3D preview; exports a zip containing top and bottom STL halves
 - **Cross-section / slice view** — GPU-accelerated clipping plane for inspecting internal geometry; X/Y/Z axis selection, position slider with interactive drag, flip side toggle, stencil-buffer cross-section cap for solid fill at the cut face; works with all view styles
 - **Surface texture** — apply hemispherical bumps or mesh weave to selected surface regions; click-to-select faces via flood-fill (30° normal threshold); Apply/Reset buttons; preset + spacing/radius/cell/height parameters; geometry merged into base mesh and exported with model
+- **Parametric STEP completion ping** — short two-tone Web Audio ding (880 Hz → 1320 Hz) plays when a parametric STEP export finishes (success or failure). Audio context is unlocked on first page interaction so the deferred ping (minutes after the click) is not blocked by autoplay policy
 
 ### Train Detection & AC Infinity Control
 Real-time train detection system using a SparkFun SEN-12642 sound sensor connected to an ESP32 running ESPHome firmware. Automatically increases the AC Infinity Controller 69 Pro fan speed to 80% when a train passes, compensating for air pressure fluctuations, then restores the previous speed afterward.

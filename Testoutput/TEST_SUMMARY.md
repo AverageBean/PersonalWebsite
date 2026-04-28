@@ -251,6 +251,58 @@ Gap-aware perpendicular segmentation (2026-03-23) splits wall pairs with non-con
 
 ---
 
+## Mold-Top Phase D Regression Fixes (false rect pocket, false base channels, through-sprue)
+**Date:** 2026-04-27
+**Status:** Resolved
+**Active:** `Testoutput/2026-04-27_parametric_MeshRing1-mold-top.step`
+**Archive:** —
+
+### Problem
+Three regressions on `MeshRing1-mold-top.stl` introduced by the Phase D ESP35Box work:
+1. `detect_inner_pocket` mis-identified the cylindrical inside of a circular cavity as 4 rectangular walls and applied a 58.7×58.6×3.5mm rectangular pocket cut.
+2. Phase D.5 sampled at `0.5*(part_lo+floor_pos)` for a downward-opening cavity, which lands inside the cavity and traced the ring impression as 50×50 / 40×40 false base channels.
+3. Sprue (r=2.99mm, depth_span=3.4mm) was classified as through because its radius fell below the 8mm gate that triggers the interior-plane lookup, and depth_span exceeded the 0.25*part_h=3.25mm through threshold.
+
+### Fixes
+- **Wall planarity gate** in `detect_inner_pocket`: each detected wall position must match an accepted (non-curvature-rejected) axis-aligned plane within 1.5 mm. Curved cavities have their X/Z planes pre-rejected as `spread > 0.45 mm`, so no match → no false rectangular pocket.
+- **Phase D.5 cavity-direction gate**: skip base-channel detection when `inner_pockets[0]["open_toward_hi"] == False`. Base-channel concept assumes solid material below the floor.
+- **Boundary-case sprue classifier** in `_classify_hole_depth`: when face-centre depth_span is within ±25% of the through/blind threshold AND a substantial interior plane (≥500 inliers) overlaps the hole footprint, use the plane as the cavity floor. Opening side determined by `(part_hi - d_max) < (d_min - part_lo)`.
+
+### Tests Used
+`tools/test-parametric-step.py`, 4/4 PASS.
+- MeshRing1 (Phase A baseline) — PASS
+- Station_3_Baseplate (Phase A box) — PASS
+- ESP35Box (Phase D regression check) — vol ratio 0.9984, mean dev 0.100 mm — PASS
+- MeshRing1-mold-top (NEW) — vol ratio 1.0135, asserts no `base channel`, no `pocket cut:`, no `sprue hole cut: r=2.99mm, through`; expects `blind-pocket`, `ring pocket cut` — PASS
+
+### Interpretation
+Mold-top vol_ratio restored to 1.0135 (matches Phase C-0 baseline of 1.019). ESP35Box vol_ratio retained at 0.9984 (no regression from the new wall planarity gate, since ESP35Box's inner walls correspond to actual detected planes). Sprue is now correctly classified as blind from the top face down to the cavity floor at Y=5.98mm.
+
+---
+
+## Parametric STEP Completion Ping
+**Date:** 2026-04-27
+**Status:** Resolved
+**Active:** `tests/parametric-ping.spec.js` (4 tests)
+**Archive:** —
+
+### Problem
+Parametric STEP conversions take 2-7 minutes; user wanted an audible cue when the export finishes (success or failure) so the wait can be done in another window.
+
+### Tests Used
+`tests/parametric-ping.spec.js`, chromium, 4/4 pass. Tests stub `AudioContext.prototype.createOscillator` to count calls and stub the `/api/convert/stl-to-step-parametric` endpoint via `page.route` so no converter service is needed.
+- ping fires after successful parametric STEP export (osc=2)
+- ping fires after parametric STEP failure / 500 (osc=2)
+- ping does NOT fire after STL export (osc=0)
+- AudioContext spy not triggered by non-parametric paths (osc=0)
+
+Regression: `tests/viewer-controls.spec.js` 21/21 pass.
+
+### Interpretation
+Two-tone ding (880 Hz, then 1320 Hz, 180 ms each) plays in the export's `finally` block when `formatKey === "step-parametric"`. AudioContext is lazy-created and resumed inside the click's user-gesture window so the deferred ping (minutes after the click) is not blocked by autoplay policy. Audio failures are swallowed so a missing/blocked AudioContext cannot break the export.
+
+---
+
 ## Temp / Unlabeled Outputs
 **Archive:** `archive/tmp_conversion_test.js`, `archive/test_meshring1_quick.step`
 

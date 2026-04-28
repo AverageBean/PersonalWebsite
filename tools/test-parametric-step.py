@@ -78,6 +78,29 @@ TESTS = [
         "min_cylinders_in_step": 10,    # corner fillets (4) + oblong end caps (8+)
     },
     {
+        "stl": "MeshRing1-mold-top.stl",
+        "description": "Phase D regression — downward-opening ring cavity + sprue (no false rect pocket, no false base channels, sprue blind to floor)",
+        "expect_log": [
+            "detecting planes",
+            "box CSG",
+            "ring pocket cut",
+            "sprue hole cut",
+            "blind-pocket",
+            "analytical solid",
+        ],
+        "reject_log": [
+            "triangulated fallback",
+            "base channel",
+            "sprue hole cut: r=2.99mm, through",
+            "pocket cut:",                  # rect pocket cut must not fire on circular cavity
+        ],
+        "expect_step": ["PLANE", "CYLINDRICAL_SURFACE"],
+        "reject_step": [],
+        "min_coverage": 0.50,
+        "vol_ratio_min": 0.95,
+        "vol_ratio_max": 1.05,
+    },
+    {
         "stl": "ESP35Box.stl",
         "description": "Phase D — hollow electronics enclosure (pocket + base-channel cuts)",
         "expect_log": [

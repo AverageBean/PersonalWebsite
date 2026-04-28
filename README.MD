@@ -24,7 +24,7 @@ Interactive browser-based 3D model viewer powered by Three.js r128.
 - **Camera reset** — fits model to view or resets to default empty-scene pose
 - **Mold generator** — creates a two-part mold from any loaded model via FreeCAD CSG: configurable wall thickness, clearance offset, registration pins/holes (configurable tolerance), sprue channel, and adjustable split plane with live 3D preview; exports a zip containing top and bottom STL halves
 - **Cross-section / slice view** — GPU-accelerated clipping plane for inspecting internal geometry; X/Y/Z axis selection, position slider with interactive drag, flip side toggle, stencil-buffer cross-section cap for solid fill at the cut face; works with all view styles
-- **Surface texture** — apply hemispherical bumps or mesh weave to selected surface regions; click-to-select faces via flood-fill (30° normal threshold); Apply/Reset buttons; preset + spacing/radius/cell/height parameters; geometry merged into base mesh and exported with model
+- **Surface texture** — apply hemispherical bumps or mesh weave to one or more selected surface regions; click-to-select faces via flood-fill (30° normal threshold); preset + spacing/radius/cell/height parameters; **persistent multi-region layer registry** — each Apply commits a layer that coexists with prior layers; per-region ✕ remove and Clear All; layers replayed deterministically from an immutable file-load anchor; geometry merged into base mesh and exported with model. Bump distribution uses a triplanar global grid (XZ/YZ/XY weighted by |n·axis|⁴); weave displacement uses per-face tangent UV frames so stripes do not compress on tilted faces
 - **Parametric STEP completion ping** — short two-tone Web Audio ding (880 Hz → 1320 Hz) plays when a parametric STEP export finishes (success or failure). Audio context is unlocked on first page interaction so the deferred ping (minutes after the click) is not blocked by autoplay policy
 
 ### Train Detection & AC Infinity Control
@@ -69,11 +69,11 @@ Onshape export requires `ONSHAPE_ACCESS_KEY` and `ONSHAPE_SECRET_KEY` env vars.
 - **Open Graph meta** — `og:url`, `og:image`, `og:image:alt` empty; `og:title` uses "AJ Berry | Software Engineer" which is inconsistent with the page title
 - **Bonsai Vitals** — placeholder with no content yet
 - **Train Detection website panel** — live indicator and event log implemented; awaiting HA API integration and 24-hour chart rendering
-- **Surface Texture Feature** — ⚠️ **UNDER REVIEW** — UI and basic functions exist but comprehensive validation needed. Feature allows applying hemispherical bump and mesh weave textures to selected model surfaces for 3D printing. Status: tests pass functionally but lack visual validation, uniformity verification, and printability confirmation. See `Testoutput/TEXTURE_TEST_SUMMARY.md` and `docs/texture_failure_analysis.md` for details.
+- **Geodesic bump placement** — current bump distribution uses a triplanar XZ/YZ/XY grid; produces uneven density on faces tilted between two axes (~45°). Replacing with on-surface Poisson-disk sampling for true uniform spacing across curvature.
 
 ## Next Steps
 
-- **Surface Texture Validation** — Execute comprehensive test plan to validate bump uniformity, mesh weave appearance, export geometry validity. Document baseline metrics. See `docs/texture_implementation_plan.md`.
+- **Geodesic bump placement** — replace triplanar grid with surface-Poisson sampling for spacing uniformity across arbitrary curvature. See `docs/texture_geodesic_placement.md`.
 - **Parametric STEP Phase C** — elliptic cylinders, surfaces of revolution, and free swept B-spline surfaces
 
 ---

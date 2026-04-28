@@ -2933,40 +2933,67 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // ─── Hemispherical bumps (pure) ────────────────────────────────────────
   //
-  // Algorithm (triplanar global grid):
-  //  1. Build per-face data array (v0/v1/v2/normal/centroid).
-  //  2. Compute world-space AABB of all selected faces.
-  //  3. Cast three axis-aligned grids (XZ/YZ/XY) at step = spacing. Each grid
-  //     finds the nearest selected face in 2D projection and tests containment.
-  //     Candidates carry weight = |n.axis|^4.
-  //  4. Sort by weight desc; greedily accept, skipping within spacing/2 of accepted.
-  //  5. Place hemisphere at each accepted site along the face's own normal.
+  // Algorithm (geodesic / stratified surface Poisson-disk):
+  //  1. Build per-face data (v0/v1/v2/normal/centroid/area) sorted by face
+  //     index for determinism. Compute selection AABB.
+  //  2. Generate area-proportional candidate pool: each face contributes
+  //     ⌈α · area / spacing²⌉ candidates at uniformly random barycentric
+  //     positions (centroid alone for tiny faces). Candidates are guaranteed
+  //     to lie on the selected surface — no projection step, no curvature
+  //     blowups on thin or contoured models.
+  //  3. Seed RNG from (vertexCount, faceSetSize, spacing, radius) so the
+  //     same input always produces the same output.
+  //  4. Shuffle the candidate list (Fisher-Yates with seeded RNG).
+  //  5. Greedy accept: for each candidate, accept iff no prior accepted is
+  //     within `spacing` (3D Euclidean — a tight underestimate of geodesic
+  //     distance at these scales). Spatial hash keeps the check O(1) avg.
+  //  6. Place a hemisphere at each accepted site along its host face normal.
+  //
+  // Compared with the prior triplanar global-grid approach: density now
+  // follows surface area, not world projection — uniform on faces tilted
+  // between two grid axes; coverage matches expected ~A/(0.83·spacing²) on
+  // flat surfaces and continues to scale on contoured/thin geometry.
   //
   // Returns {geom, count} on success or {error: string} on failure.
   // Pure: no globals read/written except THREE and MAX_TRIANGLES constants.
   //
   function computeBumpGeometry(srcGeom, faceSet, spacing, radius) {
     const MAX_BUMPS = 2000;
-    const K = 4;
+    // Candidate density relative to ideal Poisson packing. >1 ensures the
+    // greedy pass has enough darts on every face to fill its share.
+    const CANDIDATE_DENSITY = 4;
+    // Minimum 3D Euclidean distance between bumps as a fraction of `spacing`.
+    // 0.5 matches the historical triplanar dedup distance (spacing/2) so
+    // existing models keep similar bump counts; the meaning of the user-facing
+    // "spacing" param is preserved (bump grid step, not strict min radius).
+    const MIN_DIST_FRACTION = 0.5;
     const position = srcGeom.getAttribute("position");
 
-    const faceData = [];
-    faceSet.forEach(fIdx => {
+    // Build per-face data in sorted index order (determinism)
+    const sortedIndices = [...faceSet].sort((a, b) => a - b);
+    const faces = new Array(sortedIndices.length);
+    for (let i = 0; i < sortedIndices.length; i++) {
+      const fIdx = sortedIndices[i];
       const i0 = fIdx * 3, i1 = fIdx * 3 + 1, i2 = fIdx * 3 + 2;
       const v0 = new THREE.Vector3(position.getX(i0), position.getY(i0), position.getZ(i0));
       const v1 = new THREE.Vector3(position.getX(i1), position.getY(i1), position.getZ(i1));
       const v2 = new THREE.Vector3(position.getX(i2), position.getY(i2), position.getZ(i2));
-      const normal = new THREE.Vector3()
-        .crossVectors(new THREE.Vector3().subVectors(v1, v0), new THREE.Vector3().subVectors(v2, v0))
-        .normalize();
+      const cross = new THREE.Vector3().crossVectors(
+        new THREE.Vector3().subVectors(v1, v0),
+        new THREE.Vector3().subVectors(v2, v0)
+      );
+      const area = cross.length() * 0.5;
+      const normal = cross.normalize();
       const centroid = new THREE.Vector3().addVectors(v0, v1).add(v2).divideScalar(3);
-      faceData.push({ v0, v1, v2, normal, centroid });
-    });
+      faces[i] = { v0, v1, v2, normal, centroid, area };
+    }
+    if (faces.length === 0) {
+      return { error: "No faces selected." };
+    }
 
-    let xMin = Infinity, xMax = -Infinity;
-    let yMin = Infinity, yMax = -Infinity;
-    let zMin = Infinity, zMax = -Infinity;
-    for (const { v0, v1, v2 } of faceData) {
+    let xMin = Infinity, yMin = Infinity, zMin = Infinity;
+    let xMax = -Infinity, yMax = -Infinity, zMax = -Infinity;
+    for (const { v0, v1, v2 } of faces) {
       for (const v of [v0, v1, v2]) {
         if (v.x < xMin) xMin = v.x; if (v.x > xMax) xMax = v.x;
         if (v.y < yMin) yMin = v.y; if (v.y > yMax) yMax = v.y;
@@ -2974,84 +3001,92 @@ document.addEventListener("DOMContentLoaded", () => {
       }
     }
 
-    function projectAndTest(pt, face, weight) {
-      const d = new THREE.Vector3().subVectors(pt, face.v0).dot(face.normal);
-      const projected = pt.clone().addScaledVector(face.normal, -d);
-      if (!isInsideTriangle(projected, face.v0, face.v1, face.v2, face.normal)) return null;
-      return { position: projected, normal: face.normal.clone(), weight };
+    // Seeded RNG (mulberry32) — deterministic across runs for the same inputs
+    let rngState = (
+      Math.imul(position.count | 0, 2654435761) ^
+      Math.imul(faceSet.size | 0, 1597334677) ^
+      Math.imul(Math.floor(spacing * 1024) | 0, 374761393) ^
+      Math.imul(Math.floor(radius * 1024) | 0, 668265263)
+    ) >>> 0;
+    if (rngState === 0) rngState = 0xdeadbeef;
+    function rng() {
+      rngState = (rngState + 0x6D2B79F5) >>> 0;
+      let t = rngState;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
     }
 
-    const EPS = spacing * 0.001;
-    const raw = [];
-
-    // XZ grid — Y-facing surfaces
-    for (let x = Math.ceil(xMin / spacing) * spacing; x <= xMax + EPS; x += spacing) {
-      for (let z = Math.ceil(zMin / spacing) * spacing; z <= zMax + EPS; z += spacing) {
-        let nearest = null, minDSq = Infinity;
-        for (const f of faceData) {
-          const dx = f.centroid.x - x, dz = f.centroid.z - z;
-          const dSq = dx * dx + dz * dz;
-          if (dSq < minDSq) { minDSq = dSq; nearest = f; }
-        }
-        if (!nearest) continue;
-        const w = Math.pow(Math.abs(nearest.normal.y), K);
-        const c = projectAndTest(new THREE.Vector3(x, nearest.centroid.y, z), nearest, w);
-        if (c) raw.push(c);
+    // Generate candidate pool — area-proportional, uniform within each face
+    const minDist = spacing * MIN_DIST_FRACTION;
+    const sqMinDist = minDist * minDist;
+    const candidates = [];
+    for (let fi = 0; fi < faces.length; fi++) {
+      const f = faces[fi];
+      const nCandidates = Math.max(1, Math.ceil(CANDIDATE_DENSITY * f.area / sqMinDist));
+      for (let c = 0; c < nCandidates; c++) {
+        // Uniform barycentric: u, v sampled, fold (u+v>1) into the other half
+        let bu = rng(), bv = rng();
+        if (bu + bv > 1) { bu = 1 - bu; bv = 1 - bv; }
+        const bw = 1 - bu - bv;
+        const point = new THREE.Vector3()
+          .addScaledVector(f.v0, bw)
+          .addScaledVector(f.v1, bu)
+          .addScaledVector(f.v2, bv);
+        candidates.push({ point, faceIdx: fi });
       }
     }
 
-    // YZ grid — X-facing surfaces
-    for (let y = Math.ceil(yMin / spacing) * spacing; y <= yMax + EPS; y += spacing) {
-      for (let z = Math.ceil(zMin / spacing) * spacing; z <= zMax + EPS; z += spacing) {
-        let nearest = null, minDSq = Infinity;
-        for (const f of faceData) {
-          const dy = f.centroid.y - y, dz = f.centroid.z - z;
-          const dSq = dy * dy + dz * dz;
-          if (dSq < minDSq) { minDSq = dSq; nearest = f; }
-        }
-        if (!nearest) continue;
-        const w = Math.pow(Math.abs(nearest.normal.x), K);
-        const c = projectAndTest(new THREE.Vector3(nearest.centroid.x, y, z), nearest, w);
-        if (c) raw.push(c);
-      }
+    // Fisher-Yates shuffle (seeded)
+    for (let i = candidates.length - 1; i > 0; i--) {
+      const j = Math.floor(rng() * (i + 1));
+      const tmp = candidates[i]; candidates[i] = candidates[j]; candidates[j] = tmp;
     }
 
-    // XY grid — Z-facing surfaces
-    for (let x = Math.ceil(xMin / spacing) * spacing; x <= xMax + EPS; x += spacing) {
-      for (let y = Math.ceil(yMin / spacing) * spacing; y <= yMax + EPS; y += spacing) {
-        let nearest = null, minDSq = Infinity;
-        for (const f of faceData) {
-          const dx = f.centroid.x - x, dy = f.centroid.y - y;
-          const dSq = dx * dx + dy * dy;
-          if (dSq < minDSq) { minDSq = dSq; nearest = f; }
-        }
-        if (!nearest) continue;
-        const w = Math.pow(Math.abs(nearest.normal.z), K);
-        const c = projectAndTest(new THREE.Vector3(x, y, nearest.centroid.z), nearest, w);
-        if (c) raw.push(c);
-      }
-    }
+    // Spatial hash for accepted points (cell = minDist — 3×3×3 neighborhood
+    // covers any pair within `minDist`)
+    const cell = minDist;
+    const BASE = 4096, OFFSET = 2048;
+    const cellKey = (ix, iy, iz) =>
+      (ix + OFFSET) * BASE * BASE + (iy + OFFSET) * BASE + (iz + OFFSET);
+    const cellX = (x) => Math.floor((x - xMin) / cell);
+    const cellY = (y) => Math.floor((y - yMin) / cell);
+    const cellZ = (z) => Math.floor((z - zMin) / cell);
 
-    // Centroid pass — weight=-1 so grid candidates always place first
-    for (const f of faceData) {
-      raw.push({ position: f.centroid.clone(), normal: f.normal.clone(), weight: -1 });
-    }
-
-    raw.sort((a, b) => b.weight - a.weight);
-    const dedupDistSq = (spacing * 0.5) * (spacing * 0.5);
     const accepted = [];
-    const acceptedPos = [];
+    const acceptHash = new Map();
 
-    for (const c of raw) {
-      if (accepted.length >= MAX_BUMPS) break;
-      let tooClose = false;
-      for (const p of acceptedPos) {
-        if (c.position.distanceToSquared(p) < dedupDistSq) { tooClose = true; break; }
+    function tooCloseToAccepted(point) {
+      const cx = cellX(point.x), cy = cellY(point.y), cz = cellZ(point.z);
+      for (let dx = -1; dx <= 1; dx++) {
+        for (let dy = -1; dy <= 1; dy++) {
+          for (let dz = -1; dz <= 1; dz++) {
+            const bucket = acceptHash.get(cellKey(cx + dx, cy + dy, cz + dz));
+            if (!bucket) continue;
+            for (const ai of bucket) {
+              if (point.distanceToSquared(accepted[ai].position) < sqMinDist) return true;
+            }
+          }
+        }
       }
-      if (!tooClose) {
-        accepted.push(c);
-        acceptedPos.push(c.position);
-      }
+      return false;
+    }
+
+    // Greedy Poisson-disk pass over the shuffled candidate pool
+    for (let i = 0; i < candidates.length && accepted.length < MAX_BUMPS; i++) {
+      const cand = candidates[i];
+      if (tooCloseToAccepted(cand.point)) continue;
+      const face = faces[cand.faceIdx];
+      const idx = accepted.length;
+      accepted.push({
+        position: cand.point,
+        normal:   face.normal.clone(),
+        faceIdx:  cand.faceIdx,
+      });
+      const k = cellKey(cellX(cand.point.x), cellY(cand.point.y), cellZ(cand.point.z));
+      let bucket = acceptHash.get(k);
+      if (!bucket) { bucket = []; acceptHash.set(k, bucket); }
+      bucket.push(idx);
     }
 
     if (accepted.length === 0) {

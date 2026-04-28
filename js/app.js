@@ -3124,7 +3124,16 @@ document.addEventListener("DOMContentLoaded", () => {
     const mergedGeom = new THREE.BufferGeometry();
     mergedGeom.setAttribute("position", new THREE.Float32BufferAttribute(allPos, 3));
 
-    return { geom: mergedGeom, count: accepted.length };
+    // Centers buffer (x0,y0,z0,x1,…) used by tests to assert spacing uniformity.
+    // Cheap to populate — accepted is already in memory.
+    const centers = new Float32Array(accepted.length * 3);
+    for (let i = 0; i < accepted.length; i++) {
+      centers[i * 3]     = accepted[i].position.x;
+      centers[i * 3 + 1] = accepted[i].position.y;
+      centers[i * 3 + 2] = accepted[i].position.z;
+    }
+
+    return { geom: mergedGeom, count: accepted.length, centers };
   }
 
   // ─── Mesh weave displacement (pure) ────────────────────────────────────
@@ -3345,6 +3354,9 @@ document.addEventListener("DOMContentLoaded", () => {
       layerParams = { spacing, radius };
       if (result && !result.error) {
         statusMsg = `Applied ${result.count} bumps — ${spacing}mm spacing, ${radius}mm radius.`;
+        // Test hook: expose accepted bump centers for uniformity assertions.
+        window.__textureBumpCenters = result.centers;
+        window.__textureBumpSpacing = spacing;
       }
     } else {
       const height      = parseFloat(meshHeightInput.value);

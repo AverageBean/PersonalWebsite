@@ -73,7 +73,7 @@ Onshape export requires `ONSHAPE_ACCESS_KEY` and `ONSHAPE_SECRET_KEY` env vars.
 ## Next Steps
 
 - **Geodesic distance for thin models** — current 3D-Euclidean spacing check is fine at default settings but blocks bumps on opposing surfaces when the user-set spacing approaches model thickness. Replace with face-graph BFS distance.
-- **Parametric STEP Phase C** — elliptic cylinders, surfaces of revolution, and free swept B-spline surfaces
+- **Parametric STEP Phase C-2** — surfaces of revolution. Phase C-1 (elliptic cylinders) shipped 2026-04-29. C-3 (free swept B-spline surfaces) remains.
 
 ---
 

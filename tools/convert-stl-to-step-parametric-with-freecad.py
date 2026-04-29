@@ -135,6 +135,15 @@ SPHERE_MAX_ROUNDS            = 15    # max RANSAC rounds for spheres
 # slots on both sides, giving ratio 0.33 even though it's through).
 BLIND_HOLE_DEPTH_RATIO       = 0.25
 
+# ── Phase C-1: Elliptic cylinder detection ───────────────────────────────────
+# Faces are projected onto a plane perpendicular to a candidate axis; an
+# ellipse is fit via Fitzgibbon's direct algebraic method. Inliers are the
+# faces whose projection falls within ELLIPSE_INLIER_TOL of the fitted ellipse.
+ELLIPTIC_MIN_INLIERS         = 30    # minimum faces for a valid elliptic cyl
+ELLIPSE_INLIER_TOL           = 0.30  # mm — perp distance threshold
+# Reject as a circle (handled by Phase A) when the axis ratio b/a exceeds this:
+ELLIPTIC_MIN_AXIS_RATIO_GAP  = 0.05  # require (a-b)/a > this — i.e. b/a < 0.95
+
 
 # ── Load mesh ─────────────────────────────────────────────────────────────────
 
@@ -707,6 +716,269 @@ def detect_spheres(pts, nrm, used, total):
     return results
 
 
+# ── Phase C-1: Elliptic cylinder detection ──────────────────────────────────
+
+def fit_ellipse_2d(points):
+    """
+    Direct algebraic ellipse fit via Fitzgibbon, Pilu, Fisher (1999).
+
+    Solves the constrained least-squares problem  4AC - B² = 1  on the conic
+    Ax² + Bxy + Cy² + Dx + Ey + F = 0, then converts the conic coefficients to
+    canonical form: centre (cx,cy), semi-axes (semi_a, semi_b), rotation θ.
+
+    Args:
+        points: (N, 2) numpy array of XY coordinates.
+
+    Returns:
+        dict {cx, cy, semi_a, semi_b, theta} where semi_a >= semi_b, or
+        None on degenerate input (collinear / fewer than 6 points / no real
+        ellipse solution).
+    """
+    if points.shape[0] < 6:
+        return None
+
+    x = points[:, 0]
+    y = points[:, 1]
+
+    # Build scatter matrices
+    D1 = np.column_stack([x * x, x * y, y * y])
+    D2 = np.column_stack([x, y, np.ones_like(x)])
+    S1 = D1.T @ D1
+    S2 = D1.T @ D2
+    S3 = D2.T @ D2
+
+    # Constraint matrix C1 enforces 4AC - B² = 1
+    C1 = np.array([[0.0, 0.0, 2.0],
+                   [0.0, -1.0, 0.0],
+                   [2.0, 0.0, 0.0]])
+
+    try:
+        T = -np.linalg.solve(S3, S2.T)
+        M = S1 + S2 @ T
+        M = np.linalg.solve(C1, M)
+        eigval, eigvec = np.linalg.eig(M)
+    except np.linalg.LinAlgError:
+        return None
+
+    # Pick eigenvector with positive constraint cond (real ellipse).
+    # eigvec[i, k] is the i-th component of the k-th eigenvector (column).
+    # eig() may return complex; take real parts for the constraint test.
+    eigvec_r = eigvec.real
+    cond = 4.0 * eigvec_r[0, :] * eigvec_r[2, :] - eigvec_r[1, :] ** 2
+    valid = np.where(cond > 0)[0]
+    if valid.size == 0:
+        return None
+    a1 = eigvec_r[:, valid[0]]
+
+    a2 = T @ a1
+    A, B, C = float(a1[0]), float(a1[1]), float(a1[2])
+    D, E, F = float(a2[0]), float(a2[1]), float(a2[2])
+
+    # Canonical form
+    denom = B * B - 4.0 * A * C
+    if abs(denom) < 1e-12:
+        return None
+    cx = (2.0 * C * D - B * E) / denom
+    cy = (2.0 * A * E - B * D) / denom
+
+    # Canonical semi-axes: derived from
+    # https://en.wikipedia.org/wiki/Ellipse#General_ellipse  (sign flip on num)
+    num = 2.0 * (A * E * E + C * D * D - B * D * E + denom * F)
+    s   = math.sqrt((A - C) ** 2 + B * B)
+    a_sq = -num / (denom * ((A + C) + s))
+    b_sq = -num / (denom * ((A + C) - s))
+    if a_sq <= 0 or b_sq <= 0:
+        return None
+    a = math.sqrt(a_sq)
+    b = math.sqrt(b_sq)
+    if abs(B) < 1e-12 and A < C:
+        # Already axis-aligned, semi-major along Y
+        theta = math.pi / 2.0
+    elif abs(B) < 1e-12:
+        theta = 0.0
+    else:
+        theta = 0.5 * math.atan2(B, A - C)
+
+    # Order so semi_a >= semi_b
+    if a < b:
+        a, b = b, a
+        theta += math.pi / 2.0
+
+    return {"cx": cx, "cy": cy, "semi_a": a, "semi_b": b, "theta": theta}
+
+
+def ellipse_distances(points, fit):
+    """
+    Approximate perpendicular distances from points to a fitted ellipse.
+
+    Uses the algebraic-distance / radial-scaling approximation: for each
+    point, compute its angle as seen from the centre in the rotated frame,
+    take the radial position on the ellipse at that angle, and return
+    |radial_point - radial_ellipse|. Faster than exact closest-point and
+    accurate to within ~5% for points within ~30% of the semi-minor of the
+    boundary — good enough for inlier classification at sub-mm tolerances.
+    """
+    cx, cy = fit["cx"], fit["cy"]
+    a,  b  = fit["semi_a"], fit["semi_b"]
+    th     = fit["theta"]
+    cos_t  = math.cos(th)
+    sin_t  = math.sin(th)
+    # Rotate points into ellipse-aligned frame, centred at origin
+    dx = points[:, 0] - cx
+    dy = points[:, 1] - cy
+    xp =  cos_t * dx + sin_t * dy
+    yp = -sin_t * dx + cos_t * dy
+    # Radial position of the point in the ellipse frame
+    r_pt = np.hypot(xp, yp)
+    # Radial position on the ellipse boundary at the same direction as the
+    # point.  In polar form: r(θ) = a·b / √((b·cosθ)² + (a·sinθ)²).
+    # Substituting cosθ = xp/r_pt, sinθ = yp/r_pt:
+    #   r_ell = a·b·r_pt / √((b·xp)² + (a·yp)²)
+    safe   = r_pt > 1e-9
+    denom  = np.sqrt((b * xp) ** 2 + (a * yp) ** 2 + 1e-30)
+    r_ell  = np.where(safe, (a * b * r_pt) / denom, a)
+    return np.abs(r_pt - r_ell)
+
+
+def detect_elliptic_cylinders(face_centers, face_normals, used, total,
+                               mesh_triangles=None):
+    """
+    Detect elliptic-cylinder faces on currently-unclaimed faces.
+
+    Strategy:
+      1. Restrict to faces with normals approximately perpendicular to
+         body_axis (Z by default) — i.e. lateral wall faces.
+      2. Project their centres onto the XY plane.
+      3. Run Fitzgibbon ellipse fit; classify projections within
+         ELLIPSE_INLIER_TOL as inliers.
+      4. Reject if axis ratio b/a is too close to 1 (would be detected as a
+         circle by Phase A) or too extreme to be a real surface.
+
+    Iterative — extracts one ellipse per round, marks inliers, retries on
+    remaining faces.
+
+    Args:
+        mesh_triangles: optional (N, 3, 3) ndarray of triangle vertex
+            coordinates. When provided, z_min/z_max are taken from inlier
+            triangle vertices (true extrusion range); otherwise from
+            centroids (a tighter inner range).
+
+    Returns list of dicts:
+      {center: (cx, cy, cz),  axis: (0, 0, 1) for now,
+       semi_a, semi_b, theta,  z_min, z_max,
+       inliers, inlier_mask}.
+    """
+    avail = ~used
+    if int(avail.sum()) < ELLIPTIC_MIN_INLIERS:
+        return []
+
+    # Phase 1 scope: only handle Z-extruded ellipses. Filter to faces with
+    # |normal·Z| < 0.30 (lateral wall faces — same threshold as cylinder
+    # candidate filter, HORIZ_THRESHOLD).
+    Z = np.array([0.0, 0.0, 1.0])
+    lat_cos = np.abs(face_normals @ Z)
+    lat_mask = avail & (lat_cos < HORIZ_THRESHOLD)
+    n_lat = int(lat_mask.sum())
+    print(
+        f"[parametric] elliptic detect: {n_lat} unclaimed lateral faces",
+        flush=True,
+    )
+    if n_lat < ELLIPTIC_MIN_INLIERS:
+        return []
+
+    avail_idx = np.where(lat_mask)[0]
+    avail_pts = face_centers[avail_idx]
+
+    remaining = np.ones(len(avail_idx), dtype=bool)
+    results = []
+
+    for round_i in range(5):  # at most 5 elliptic cylinders per part
+        n_rem = int(remaining.sum())
+        if n_rem < ELLIPTIC_MIN_INLIERS:
+            break
+
+        sub_idx = np.where(remaining)[0]
+        sub_pts = avail_pts[sub_idx]
+        proj_xy = sub_pts[:, :2]
+
+        fit = fit_ellipse_2d(proj_xy)
+        if fit is None:
+            print(
+                f"[parametric]   elliptic round {round_i+1}: fit degenerate",
+                flush=True,
+            )
+            break
+
+        a, b = fit["semi_a"], fit["semi_b"]
+        # Validate: not a circle (would be Phase A territory)
+        if a <= 0 or (a - b) / a < ELLIPTIC_MIN_AXIS_RATIO_GAP:
+            print(
+                f"[parametric]   elliptic round {round_i+1}: axes too "
+                f"equal (a={a:.2f}, b={b:.2f}) — circular, skip",
+                flush=True,
+            )
+            break
+
+        # Inlier classification
+        d = ellipse_distances(proj_xy, fit)
+        inl_local = sub_idx[d < ELLIPSE_INLIER_TOL]
+        n_inl = inl_local.size
+        if n_inl < ELLIPTIC_MIN_INLIERS:
+            print(
+                f"[parametric]   elliptic round {round_i+1}: "
+                f"only {n_inl} inliers (< {ELLIPTIC_MIN_INLIERS})",
+                flush=True,
+            )
+            break
+
+        # Mean residual sanity check
+        mean_resid = float(d[d < ELLIPSE_INLIER_TOL].mean())
+        if mean_resid > ELLIPSE_INLIER_TOL * 0.7:
+            print(
+                f"[parametric]   elliptic round {round_i+1}: "
+                f"residual {mean_resid:.3f} mm too high",
+                flush=True,
+            )
+            break
+
+        # Build global inlier mask first; use it to get true vertex Z extents.
+        global_mask = np.zeros(total, dtype=bool)
+        global_mask[avail_idx[inl_local]] = True
+        if mesh_triangles is not None:
+            inl_tri_verts = mesh_triangles[global_mask]   # (n_inl, 3, 3)
+            z_min = float(inl_tri_verts[:, :, 2].min())
+            z_max = float(inl_tri_verts[:, :, 2].max())
+        else:
+            inl_pts = avail_pts[inl_local]
+            z_min = float(inl_pts[:, 2].min())
+            z_max = float(inl_pts[:, 2].max())
+
+        results.append({
+            "center":      np.array([fit["cx"], fit["cy"], (z_min + z_max) / 2.0]),
+            "axis":        Z.copy(),
+            "semi_a":      a,
+            "semi_b":      b,
+            "theta":       fit["theta"],
+            "z_min":       z_min,
+            "z_max":       z_max,
+            "inliers":     int(n_inl),
+            "inlier_mask": global_mask,
+        })
+
+        remaining[inl_local] = False
+        print(
+            f"[parametric]   elliptic {len(results)}: "
+            f"a={a:.2f} mm, b={b:.2f} mm, "
+            f"centre=({fit['cx']:+.1f},{fit['cy']:+.1f}), "
+            f"theta={math.degrees(fit['theta']):+.1f}°, "
+            f"Z=[{z_min:.1f},{z_max:.1f}], "
+            f"inliers={n_inl}, residual={mean_resid:.3f} mm",
+            flush=True,
+        )
+
+    return results
+
+
 # ── Run detection ─────────────────────────────────────────────────────────────
 # Planes are detected first across ALL faces using a normal-alignment filter.
 # This correctly separates flat surfaces (consistent normals) from curved faces
@@ -804,12 +1076,24 @@ for s in spheres:
     used[s["inlier_mask"]] = True
 sphere_inliers = sum(s["inliers"] for s in spheres)
 
+# Phase C-1: Detect elliptic cylinders on remaining unclaimed lateral faces.
+print("[parametric] detecting elliptic cylinders …", flush=True)
+elliptic_cyls = detect_elliptic_cylinders(
+    face_centers, face_normals, used, total_faces,
+    mesh_triangles=np.array(mesh.triangles, dtype=float),
+)
+for ec in elliptic_cyls:
+    used[ec["inlier_mask"]] = True
+elliptic_inliers = sum(ec["inliers"] for ec in elliptic_cyls)
+
 # Preliminary coverage (box fillet claiming deferred until after function definitions).
-coverage = (cyl_inliers + plane_inliers + torus_inliers + sphere_inliers) / total_faces
+coverage = (
+    cyl_inliers + plane_inliers + torus_inliers + sphere_inliers + elliptic_inliers
+) / total_faces
 print(
     f"[parametric] coverage={coverage:.1%}  "
     f"({len(cylinders)} cyl, {len(planes)} plane, {len(tori)} torus, "
-    f"{len(spheres)} sphere)",
+    f"{len(spheres)} sphere, {len(elliptic_cyls)} elliptic)",
     flush=True
 )
 
@@ -2557,6 +2841,100 @@ def build_box_solid(ext_cyls, int_cyls, planes, face_centers, face_normals, used
 BODY_CYL_MIN_RADIUS = 50  # mm
 
 
+def build_elliptic_cylinder_solid(elliptic_cyls, height_extension=0.0):
+    """
+    CSG path for parts whose primary body is an elliptic-cylinder extrusion
+    (Phase C-1).
+
+    For each detected elliptic cylinder, builds the canonical Part.Ellipse
+    curve, wraps it in a wire/face, and extrudes it along the cylinder's
+    axis to span the inlier Z range. Caps come from the planar top/bottom
+    faces (already detected by Phase A; the extruded face is closed at both
+    ends by `Part.Face(Wire)` followed by `extrude` which produces a solid).
+
+    For multiple elliptic cylinders, fuses them in radius-descending order.
+
+    Returns a Part.Shape or None on failure.
+    """
+    if not elliptic_cyls:
+        return None
+
+    def fv(v):
+        return FreeCAD.Vector(float(v[0]), float(v[1]), float(v[2]))
+
+    # Sort by semi-major (largest first) for stable boolean operations.
+    sorted_ec = sorted(elliptic_cyls, key=lambda e: e["semi_a"], reverse=True)
+
+    def make_one(ec):
+        """Build a closed solid for a single elliptic cylinder definition."""
+        a, b = ec["semi_a"], ec["semi_b"]
+        cx, cy = float(ec["center"][0]), float(ec["center"][1])
+        z_lo = ec["z_min"] - height_extension
+        z_hi = ec["z_max"] + height_extension
+        height = z_hi - z_lo
+        if height <= 0:
+            return None
+        theta = ec["theta"]
+
+        # Build ellipse in its local XY frame at z_lo, oriented per theta.
+        # Part.Ellipse(centre, major_radius, minor_radius) defaults to a Z-axis
+        # ellipse with the major axis along X.  Rotate by theta around Z to
+        # match the detected orientation.
+        ellipse = Part.Ellipse(FreeCAD.Vector(cx, cy, z_lo), a, b)
+        if abs(theta) > 1e-6:
+            placement = FreeCAD.Placement(
+                FreeCAD.Vector(cx, cy, z_lo),
+                FreeCAD.Rotation(FreeCAD.Vector(0, 0, 1), math.degrees(theta)),
+            )
+            # Apply rotation in place around the centre
+            edge = ellipse.toShape()
+            edge.Placement = placement.multiply(
+                FreeCAD.Placement(FreeCAD.Vector(-cx, -cy, -z_lo), FreeCAD.Rotation())
+            ).multiply(edge.Placement)
+        else:
+            edge = ellipse.toShape()
+
+        wire  = Part.Wire([edge])
+        face  = Part.Face(wire)
+        solid = face.extrude(FreeCAD.Vector(0, 0, height))
+        return solid
+
+    base = make_one(sorted_ec[0])
+    if base is None or base.isNull():
+        print("[parametric] elliptic CSG: base build failed", flush=True)
+        return None
+    print(
+        f"[parametric] elliptic base: a={sorted_ec[0]['semi_a']:.2f}, "
+        f"b={sorted_ec[0]['semi_b']:.2f}, "
+        f"Z=[{sorted_ec[0]['z_min']:.1f},{sorted_ec[0]['z_max']:.1f}]",
+        flush=True,
+    )
+
+    solid = base
+    for i, ec in enumerate(sorted_ec[1:], 2):
+        sub = make_one(ec)
+        if sub is None:
+            continue
+        try:
+            solid = solid.fuse(sub)
+            print(
+                f"[parametric] elliptic {i} fused: "
+                f"a={ec['semi_a']:.2f}, b={ec['semi_b']:.2f}",
+                flush=True,
+            )
+        except Exception as exc:
+            print(f"[parametric] elliptic {i} fuse failed: {exc}", flush=True)
+
+    if solid is None or solid.isNull():
+        return None
+
+    print(
+        f"[parametric] elliptic CSG solid: {len(sorted_ec)} cylinder(s)",
+        flush=True,
+    )
+    return solid
+
+
 def build_sphere_solid(spheres):
     """
     CSG path for sphere-dominated geometry (Phase B.5-2).
@@ -2616,12 +2994,13 @@ def build_sphere_solid(spheres):
 
 
 def build_parametric_solid(cylinders, planes, face_centers, face_normals, used_after_planes,
-                           tori=None, spheres=None):
+                           tori=None, spheres=None, elliptic_cyls=None):
     """
     Attempt CSG reconstruction.  Returns a Part.Shape or None on failure.
 
     Routes to build_box_solid for prismatic parts (4+ planes detected),
-    the cylindrical CSG path for coaxial ring/boss parts, or the sphere
+    the cylindrical CSG path for coaxial ring/boss parts, the elliptic-
+    cylinder path for parts whose body is a Z-extruded ellipse, or the sphere
     path for sphere-dominated geometry.  Phase B: fuses detected tori
     (fillets) into the coaxial cylinder solid.
     """
@@ -2629,6 +3008,8 @@ def build_parametric_solid(cylinders, planes, face_centers, face_normals, used_a
         tori = []
     if spheres is None:
         spheres = []
+    if elliptic_cyls is None:
+        elliptic_cyls = []
     ext_cyls = [c for c in cylinders if not c["concave"]]
     int_cyls = [c for c in cylinders if c["concave"]]
 
@@ -2643,6 +3024,16 @@ def build_parametric_solid(cylinders, planes, face_centers, face_normals, used_a
         if solid:
             return solid
         print("[parametric] box build failed — trying cylindrical path", flush=True)
+
+    # Elliptic-cylinder path: body is a Z-extruded ellipse + cap planes.
+    # Take precedence over the cylindrical/sphere paths when an elliptic
+    # cylinder claims the body, since Phase A may have spuriously fitted
+    # one or more circular cylinders to subsets of the elliptic wall.
+    if elliptic_cyls:
+        solid = build_elliptic_cylinder_solid(elliptic_cyls)
+        if solid is not None:
+            return solid
+        print("[parametric] elliptic build failed — trying cylindrical path", flush=True)
 
     # Cylindrical path: one large outer cylinder = body; inner = holes.
     if not cylinders:
@@ -2891,7 +3282,7 @@ try:
     if coverage >= MIN_COVERAGE_FOR_PARAMETRIC:
         shape = build_parametric_solid(
             cylinders, planes, face_centers, face_normals, used_after_planes,
-            tori, spheres,
+            tori, spheres, elliptic_cyls,
         )
         if shape:
             print("[parametric] using analytical solid", flush=True)

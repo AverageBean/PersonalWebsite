@@ -125,6 +125,25 @@ TESTS = [
         "max_mean_dev_mm": 1.0,
     },
     {
+        "stl": "EllipticCylinder.stl",
+        "description": "Phase C-1 — synthetic elliptic cylinder (a=10, b=6, h=30)",
+        "expect_log": [
+            "detecting elliptic cylinders",
+            "elliptic 1:",
+            "elliptic CSG solid",
+            "analytical solid",
+        ],
+        "reject_log": [
+            "triangulated fallback",
+        ],
+        "expect_step": ["ELLIPSE", "SURFACE_OF_LINEAR_EXTRUSION", "PLANE"],
+        "reject_step": [],
+        "min_coverage": 0.50,
+        "vol_ratio_min": 0.98,
+        "vol_ratio_max": 1.02,
+        "max_mean_dev_mm": 0.05,
+    },
+    {
         "stl": "CurvedMinimalPost-Onshape.stl",
         "description": (
             "Phase C baseline (pre-implementation) — curved swept post; only Phase A+D"

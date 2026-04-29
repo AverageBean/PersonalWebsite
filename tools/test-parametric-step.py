@@ -124,6 +124,30 @@ TESTS = [
         "vol_ratio_max": 1.10,
         "max_mean_dev_mm": 1.0,
     },
+    {
+        "stl": "CurvedMinimalPost-Onshape.stl",
+        "description": (
+            "Phase C baseline (pre-implementation) — curved swept post; only Phase A+D"
+            " quadrics fit. Documents current state; tightens after Phase C lands."
+        ),
+        "expect_log": [
+            "detecting planes",
+            "analytical solid",
+        ],
+        "reject_log": [
+            "triangulated fallback",
+        ],
+        "expect_step": ["PLANE"],
+        "reject_step": [],
+        # Coverage is low (~46%) before C-1/C-2/C-3 — box CSG fills enough to push
+        # past MIN_COVERAGE_FOR_PARAMETRIC via box-fillet face claiming. Volume
+        # ratio is high (~1.47) because the box envelopes the curved-out regions.
+        # These bounds lock in current behaviour as a regression floor; Phase C
+        # work must EITHER preserve them or improve them (vol → 1.0, dev → 0).
+        "min_coverage": 0.40,
+        "vol_ratio_min": 0.90,
+        "vol_ratio_max": 1.60,
+    },
 ]
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

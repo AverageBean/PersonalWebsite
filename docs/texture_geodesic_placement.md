@@ -121,3 +121,49 @@ The first assertion is the key one for the original problem (uniformity).
 - Lloyd-relaxation post-pass (could improve uniformity further; not yet justified).
 - Adaptive spacing on high-curvature regions.
 - Per-face anisotropy hints from mesh edges.
+
+---
+
+## Aborted Experiment: Face-Graph Dijkstra (2026-04-29)
+
+A Dijkstra-on-face-adjacency variant of the spacing check was attempted to fix
+the limitation that opposing surfaces of a thin model (Aloy Focus, 6.9 mm
+thick) get blocked by the 3D Euclidean check when the user picks a spacing
+larger than the model thickness.
+
+**Implementation:** built local face adjacency (vertex-key matching at 1e-4 mm
+precision, faces sharing two vertex keys = shared edge), maintained
+`minGeodesicDist[face]` Float32Array, propagated distances via Dijkstra after
+each acceptance, replaced the 3D check with `minGeodesicDist[face] < minDist`.
+
+**Failure mode:** Aloy Focus has duplicate or near-duplicate triangles (likely
+two-sided thin-shell artefacts; observed `adjMax=30`, `edgeMin≈0.00001 mm`).
+Duplicate triangles share all 3 vertices, so they appear as adjacent in the
+face graph with edge weight ≈ 0 (centroid-to-centroid distance is essentially
+zero between an STL triangle and its near-duplicate).
+
+When Dijkstra propagates from a seed face A:
+1. The duplicate A' gets `minGeodesicDist[A'] = 0 + ε` (essentially 0).
+2. Propagation continues from A', visiting A's neighbors via A'.
+3. Subsequent acceptances on faces "near" A in 3D — but reachable only via
+   long-edge or non-adjacent paths in the face graph — pass the spacing check
+   because their `minGeodesicDist` was never updated below `minDist`.
+
+Observed result on Aloy Focus at default 5 mm spacing: 1547 bumps accepted
+(vs 148 with the 3D Euclidean version), min 3D NN distance ≈ 0 mm — bumps
+literally co-located.
+
+**Root cause analysis:**
+- Duplicate triangles inflate `adjMax` to 30 and produce zero-weight edges.
+- Mean facesVisited per Dijkstra call was 5.5 (vs ~30-50 expected for
+  `minDist=2.5mm` with avg edge ~0.5 mm), suggesting propagation gets stuck
+  on the duplicate-triangle clusters and dies before reaching a useful
+  neighbourhood.
+
+**Reverted** to the 3D Euclidean spatial-hash version (commit before the
+attempt). Future work would need either:
+- Pre-process step to deduplicate or weld near-duplicate triangles before
+  building adjacency.
+- Hybrid approach: 3D Euclidean as primary check, face-graph BFS only as
+  an escape-hatch verification when the 3D check would otherwise reject.
+- Or: full polyhedral geodesic via funnel/MMP algorithm (heavyweight).

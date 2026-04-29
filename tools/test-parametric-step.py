@@ -2,10 +2,22 @@
 Self-test for the parametric STEP converter.
 
 Run with:
-    python tools/test-parametric-step.py
+    python tools/test-parametric-step.py             # direct-invocation mode
+    python tools/test-parametric-step.py --via-http  # end-to-end via HTTP service
 
-Uses FreeCADCmd's Python directly for the conversion; checks stdout logs and
-the resulting STEP file for expected STEP entity types.
+Direct mode invokes FreeCAD's Python with the converter script and a local
+STL path. This is the fastest path but does NOT exercise the same code path
+the website uses.
+
+`--via-http` mode uploads each test STL to the running converter service at
+http://127.0.0.1:8090/api/convert/stl-to-step-parametric and validates the
+returned STEP file. This mirrors the actual user path: drag-drop file →
+upload → service spawns FreeCAD → result downloaded. Differences between the
+two modes (e.g. file-handling, environment, working directory) surface as
+test failures here rather than as user-reported surprises.
+
+The converter service must be running before invoking `--via-http`:
+    npm run convert:start
 
 Exit code 0 = all tests passed.
 Exit code 1 = one or more tests failed.
@@ -15,6 +27,9 @@ import os
 import re
 import subprocess
 import sys
+import urllib.request
+import urllib.parse
+import urllib.error
 from datetime import datetime
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
@@ -179,7 +194,13 @@ def check(condition, label):
     print(f"  [{status}] {label}")
     return condition
 
-def run_converter(stl_path, out_path):
+CONVERTER_HOST  = os.environ.get("CONVERTER_HOST", "127.0.0.1")
+CONVERTER_PORT  = int(os.environ.get("CONVERTER_PORT", "8090"))
+CONVERTER_BASE  = f"http://{CONVERTER_HOST}:{CONVERTER_PORT}"
+
+
+def run_converter_direct(stl_path, out_path):
+    """Direct mode: FreeCAD Python -> converter script -> STEP file."""
     cmd = [FREECAD_PY, CONVERTER, stl_path, out_path]
     result = subprocess.run(
         cmd,
@@ -188,6 +209,65 @@ def run_converter(stl_path, out_path):
         timeout=240,
     )
     return result.stdout, result.stderr, result.returncode
+
+
+def run_converter_via_http(stl_path, out_path):
+    """
+    HTTP mode: upload STL via POST and write the returned STEP to out_path.
+
+    The HTTP service uses the same FreeCAD/converter under the hood, but adds
+    file upload, temp-dir handling, and stream/non-stream response framing.
+    Differences in this path are exactly what causes user-reported bugs that
+    direct-mode testing misses.
+
+    Returns (stdout-equivalent, stderr-equivalent, returncode). Logs from the
+    server are NOT captured here (would require streaming mode); instead, the
+    caller should check stdout for the marker `[via-http]` and rely on the
+    STEP file content + compare-step-to-stl for validation.
+    """
+    filename = os.path.basename(stl_path)
+    encoded  = urllib.parse.quote(filename)
+    url      = f"{CONVERTER_BASE}/api/convert/stl-to-step-parametric?filename={encoded}"
+
+    try:
+        with open(stl_path, "rb") as f:
+            body = f.read()
+    except OSError as exc:
+        return ("", f"failed to read {stl_path}: {exc}", 1)
+
+    req = urllib.request.Request(
+        url,
+        data=body,
+        method="POST",
+        headers={"Content-Type": "application/octet-stream"},
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=300) as resp:
+            step_bytes = resp.read()
+    except urllib.error.HTTPError as exc:
+        body_txt = exc.read().decode("utf-8", errors="replace")
+        return ("", f"HTTP {exc.code}: {body_txt}", 1)
+    except urllib.error.URLError as exc:
+        return (
+            "",
+            f"converter service unreachable at {CONVERTER_BASE}: {exc.reason}.\n"
+            f"Start the service first:  npm run convert:start",
+            1,
+        )
+
+    with open(out_path, "wb") as f:
+        f.write(step_bytes)
+
+    # The HTTP path doesn't return converter stdout; emit a marker so direct-mode
+    # log assertions can be selectively skipped (see check_via_http callers).
+    return ("[via-http] OK\n", "", 0)
+
+
+def run_converter(stl_path, out_path, via_http=False):
+    if via_http:
+        return run_converter_via_http(stl_path, out_path)
+    return run_converter_direct(stl_path, out_path)
 
 def count_step_entities(step_path, entity_name):
     """Count occurrences of an entity type in a STEP file."""
@@ -226,12 +306,43 @@ def run_compare(stl_path, step_path):
 
 # ── Run tests ─────────────────────────────────────────────────────────────────
 
+VIA_HTTP = "--via-http" in sys.argv
+mode_label = "via HTTP service" if VIA_HTTP else "direct invocation"
+print(f"Test mode: {mode_label}")
+
 all_passed = True
+
+
+def determinism_check(stl_path):
+    """
+    Run the converter twice on the same STL and verify the outputs are
+    bit-identical except for the FILE_NAME timestamp. Catches any
+    re-introduced RANSAC stochasticity (np.random.seed must be pinned at
+    the top of the converter script for this to pass).
+    """
+    a = os.path.join(OUT_DIR, "_determinism_a.step")
+    b = os.path.join(OUT_DIR, "_determinism_b.step")
+    try:
+        run_converter_direct(stl_path, a)
+        run_converter_direct(stl_path, b)
+    except Exception as exc:
+        return False, f"converter raised: {exc}"
+    if not (os.path.exists(a) and os.path.exists(b)):
+        return False, "one or both runs produced no output"
+    with open(a, "r", errors="replace") as fa, open(b, "r", errors="replace") as fb:
+        la = [ln for ln in fa if not ln.startswith("FILE_NAME")]
+        lb = [ln for ln in fb if not ln.startswith("FILE_NAME")]
+    diff_lines = sum(1 for x, y in zip(la, lb) if x != y) + abs(len(la) - len(lb))
+    return diff_lines == 0, f"{diff_lines} differing lines"
 
 for t in TESTS:
     stl_name = t["stl"]
     stl_path = os.path.join(TEST_DOCS, stl_name)
-    out_name = f"{date_prefix}_parametric_{stl_name.replace(' ', '_').replace('.stl', '.step')}"
+    suffix = "_via-http" if VIA_HTTP else ""
+    out_name = (
+        f"{date_prefix}_parametric{suffix}_"
+        f"{stl_name.replace(' ', '_').replace('.stl', '.step')}"
+    )
     out_path = os.path.join(OUT_DIR, out_name)
 
     print(f"\n{'='*60}")
@@ -246,7 +357,7 @@ for t in TESTS:
 
     print(f"  Running converter …")
     try:
-        stdout, stderr, rc = run_converter(stl_path, out_path)
+        stdout, stderr, rc = run_converter(stl_path, out_path, via_http=VIA_HTTP)
     except subprocess.TimeoutExpired:
         print(f"  [{FAIL}] Converter timed out after 120 s")
         all_passed = False
@@ -277,21 +388,22 @@ for t in TESTS:
         size_kb = os.path.getsize(out_path) / 1024
         print(f"       STEP size: {size_kb:.1f} kB")
 
-    # Coverage
-    cov = extract_coverage(stdout)
-    if cov is not None:
-        passed &= check(
-            cov >= t["min_coverage"],
-            f"coverage {cov:.1%} >= {t['min_coverage']:.0%}"
-        )
+    # Coverage and log assertions only run in direct mode — the HTTP path
+    # doesn't surface the converter's stdout to this test runner.
+    if not VIA_HTTP:
+        cov = extract_coverage(stdout)
+        if cov is not None:
+            passed &= check(
+                cov >= t["min_coverage"],
+                f"coverage {cov:.1%} >= {t['min_coverage']:.0%}"
+            )
 
-    # Log keyword checks
-    for kw in t["expect_log"]:
-        passed &= check(kw in stdout, f"stdout contains '{kw}'")
-    for kw in t["reject_log"]:
-        ok = kw not in stdout
-        if not ok:
-            passed &= check(ok, f"stdout does NOT contain '{kw}'")
+        for kw in t["expect_log"]:
+            passed &= check(kw in stdout, f"stdout contains '{kw}'")
+        for kw in t["reject_log"]:
+            ok = kw not in stdout
+            if not ok:
+                passed &= check(ok, f"stdout does NOT contain '{kw}'")
 
     # STEP entity checks
     for entity in t["expect_step"]:
@@ -335,6 +447,21 @@ for t in TESTS:
 
     all_passed &= passed
     print(f"\n  Result: {'PASSED' if passed else 'FAILED'}")
+
+# ── Determinism gate ──────────────────────────────────────────────────────────
+# Runs after the per-test loop in direct mode only — HTTP mode pipes through
+# the same converter, so this gate covers both. If this fails, every test
+# above became a snapshot of one randomized run and the user will see drift.
+
+if not VIA_HTTP:
+    print(f"\n{'='*60}")
+    print("DETERMINISM CHECK — ESP35Box.stl run twice")
+    print(f"{'='*60}")
+    ok, detail = determinism_check(os.path.join(TEST_DOCS, "ESP35Box.stl"))
+    if check(ok, f"two runs produce bit-identical STEP (modulo timestamp) — {detail}"):
+        pass
+    else:
+        all_passed = False
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 

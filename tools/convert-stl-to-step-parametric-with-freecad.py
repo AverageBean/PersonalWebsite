@@ -29,9 +29,23 @@ Outputs to stderr + exits 1: descriptive error message on failure.
 """
 
 import os
+import random
 import sys
 import math
 import numpy as np
+
+
+# ── Determinism ──────────────────────────────────────────────────────────────
+# pyransac3d (planes, cylinders, spheres) uses numpy.random + python's random
+# module internally with no exposed seed parameter. Without seeding here,
+# consecutive runs of the converter on the same STL produce slightly
+# different STEP outputs (e.g. cylinder centres drift by ~0.05 mm between
+# runs). That non-determinism made test outputs differ from user-visible
+# conversions and made bisecting RANSAC tuning impossible. Pinning the seed
+# here makes every conversion bit-stable for a given input (only the
+# timestamp in the STEP header changes).
+np.random.seed(0xC0FFEE)
+random.seed(0xC0FFEE)
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────

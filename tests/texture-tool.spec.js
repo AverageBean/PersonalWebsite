@@ -163,7 +163,7 @@ test.describe('Surface Texture Tool', () => {
 
     // Status should change to show texture was applied
     const statusAfter = await page.locator('#statusText').textContent();
-    expect(statusAfter).toMatch(/Applied.*(bump|bumps).*to \d+ vertices|Added.*hemispherical bumps|Texture applied to \d+ vertices/);
+    expect(statusAfter).toMatch(/Applied \d+ bumps — \d+(\.\d+)?mm spacing, \d+(\.\d+)?mm radius/);
     expect(statusAfter).not.toEqual(statusBefore);
   });
 
@@ -190,7 +190,7 @@ test.describe('Surface Texture Tool', () => {
 
     // Verify texture was applied by checking status
     const statusAfter = await page.locator('#statusText').textContent();
-    expect(statusAfter).toMatch(/Applied.*(bump|bumps).*to \d+ vertices|Added.*hemispherical bumps|Texture applied to \d+ vertices/);
+    expect(statusAfter).toMatch(/Applied \d+ bumps — \d+(\.\d+)?mm spacing, \d+(\.\d+)?mm radius/);
 
     // Export button should still be enabled and ready for download
     const exportBtn = page.locator('#downloadExportButton');

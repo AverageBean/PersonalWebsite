@@ -100,7 +100,7 @@ test("Clear resets face count to zero", async ({ page }) => {
   await expect(page.locator("#textureFaceCount")).toContainText("0 faces");
 });
 
-test("Apply Bumps increases triangle count and closes panel", async ({ page }) => {
+test("Apply Bumps increases triangle count and keeps panel open", async ({ page }) => {
   await loadStl(page, BASEPLATE_STL);
   const before = await getTriangleCount(page);
   expect(before).toBeGreaterThan(0);
@@ -115,8 +115,12 @@ test("Apply Bumps increases triangle count and closes panel", async ({ page }) =
 
   await page.locator("#textureApplyBtn").click();
 
-  // Panel closes on success
-  await expect(page.locator("#texturePanel")).toBeHidden({ timeout: 15000 });
+  // Wait for apply to finish (multi-region keeps the panel open after Apply)
+  await page.waitForFunction(
+    () => document.querySelector("#textureApplySpinner").hidden === true,
+    { timeout: 15000 }
+  );
+  await expect(page.locator("#texturePanel")).toBeVisible();
 
   // Triangle count must have grown
   await page.waitForFunction((b) => {
@@ -128,7 +132,6 @@ test("Apply Bumps increases triangle count and closes panel", async ({ page }) =
   expect(after).toBeGreaterThan(before);
 
   // Reset button is now enabled
-  await openTexturePanel(page);
   await expect(page.locator("#textureResetBtn")).toBeEnabled();
 
   await page.screenshot({ path: path.join(TESTOUTPUT_DIR, `${DATE}_texture-bumps-applied.png`) });
@@ -144,10 +147,12 @@ test("Reset restores original triangle count after bumps", async ({ page }) => {
   await page.locator("#textureSelectAllBtn").click();
   await page.waitForFunction(() => parseInt(document.getElementById("textureFaceCount").textContent) > 0, { timeout: 5000 });
   await page.locator("#textureApplyBtn").click();
-  await expect(page.locator("#texturePanel")).toBeHidden({ timeout: 15000 });
+  await page.waitForFunction(
+    () => document.querySelector("#textureApplySpinner").hidden === true,
+    { timeout: 15000 }
+  );
 
-  // Re-open to access reset
-  await openTexturePanel(page);
+  // Panel stays open under multi-region; reset is reachable directly
   await page.locator("#textureResetBtn").click();
 
   await page.waitForFunction((orig) => {
@@ -172,7 +177,10 @@ test("Apply Mesh Weave increases triangle count", async ({ page }) => {
   await page.waitForFunction(() => parseInt(document.getElementById("textureFaceCount").textContent) > 0, { timeout: 5000 });
 
   await page.locator("#textureApplyBtn").click();
-  await expect(page.locator("#texturePanel")).toBeHidden({ timeout: 30000 });
+  await page.waitForFunction(
+    () => document.querySelector("#textureApplySpinner").hidden === true,
+    { timeout: 30000 }
+  );
 
   await page.waitForFunction((b) => {
     const el = document.getElementById("triangleCount");

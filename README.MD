@@ -66,14 +66,13 @@ Onshape export requires `ONSHAPE_ACCESS_KEY` and `ONSHAPE_SECRET_KEY` env vars.
 
 ## Under Construction / Incomplete
 
-- **Open Graph meta** — `og:url`, `og:image`, `og:image:alt` empty; `og:title` uses "AJ Berry | Software Engineer" which is inconsistent with the page title
+- **Open Graph meta** — `og:title`, `og:description`, `og:image`, `og:image:alt` set. `og:url` still empty pending the production URL.
 - **Bonsai Vitals** — placeholder with no content yet
 - **Train Detection website panel** — live indicator and event log implemented; awaiting HA API integration and 24-hour chart rendering
-- **Geodesic bump placement** — current bump distribution uses a triplanar XZ/YZ/XY grid; produces uneven density on faces tilted between two axes (~45°). Replacing with on-surface Poisson-disk sampling for true uniform spacing across curvature.
 
 ## Next Steps
 
-- **Geodesic bump placement** — replace triplanar grid with surface-Poisson sampling for spacing uniformity across arbitrary curvature. See `docs/texture_geodesic_placement.md`.
+- **Geodesic distance for thin models** — current 3D-Euclidean spacing check is fine at default settings but blocks bumps on opposing surfaces when the user-set spacing approaches model thickness. Replace with face-graph BFS distance.
 - **Parametric STEP Phase C** — elliptic cylinders, surfaces of revolution, and free swept B-spline surfaces
 
 ---

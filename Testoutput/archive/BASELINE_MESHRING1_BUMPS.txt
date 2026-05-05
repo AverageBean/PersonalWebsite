@@ -1,0 +1,15 @@
+
+============================================================
+TEST: MeshRing1 Bumps (Baseline)
+============================================================
+
+Uniformity: 0.0% (target: ≥90%)
+  Spacing: undefined ± undefinedmm
+  ✗ Uniformity: 0.0% (target: ≥90%)
+Export Validity: ✓ Valid
+  Degenerate triangles: 0
+  Non-manifold edges: 0
+Screenshots:
+  - C:\Users\berry\WebstormProjects\PersonalWebsite\Testoutput\2026-04-29_bump-ring-baseline.png
+  - C:\Users\berry\WebstormProjects\PersonalWebsite\Testoutput\2026-04-29_MeshRing1-bumps-baseline.stl
+============================================================

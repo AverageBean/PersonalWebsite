@@ -1,0 +1,15 @@
+
+============================================================
+TEST: Baseplate Weave (Baseline)
+============================================================
+
+Uniformity: 0.0% (target: ≥90%)
+  Spacing: undefined ± undefinedmm
+  ✗ Uniformity: 0.0% (target: ≥90%)
+Export Validity: ✗ Invalid
+  Degenerate triangles: -1
+  Non-manifold edges: 0
+Screenshots:
+  - C:\Users\berry\WebstormProjects\PersonalWebsite\Testoutput\2026-04-29_weave-baseplate-baseline.png
+  - C:\Users\berry\WebstormProjects\PersonalWebsite\Testoutput\2026-04-29_Baseplate-weave-baseline.stl
+============================================================

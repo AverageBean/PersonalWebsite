@@ -1,0 +1,9 @@
+Partial Selection Boundary Test (Baseline)
+
+Geometry Valid: YES
+Degenerate Triangles: 0
+
+Screenshot: C:\Users\berry\WebstormProjects\PersonalWebsite\Testoutput\2026-04-29_texture-boundary-baseline.png
+Export: C:\Users\berry\WebstormProjects\PersonalWebsite\Testoutput\2026-04-29_Baseplate-partial-bumps-baseline.stl
+
+Note: Visually inspect screenshot for boundary bleed or gaps

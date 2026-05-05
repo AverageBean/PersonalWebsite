@@ -1,5 +1,61 @@
 # Test Output Summary
 
+## Parametric STEP Phase C-2 — Surfaces of Revolution
+**Date:** 2026-05-05
+**Status:** Resolved
+**Active:** `2026-05-05_parametric_AIgen_RevolvedOgive.step`, `2026-05-05_parametric_AIgen_EllipticCylinder.step`, `2026-05-05_parametric_MeshRing1.step`, `2026-05-05_parametric_MeshRing1-mold-top.step`, `2026-05-05_parametric_Station_3_Baseplate_-_Part_1.step`, `2026-05-05_parametric_ESP35Box.step`, `2026-05-05_parametric_CurvedMinimalPost-Onshape.step`, `2026-05-05_pre-c2_baseline_AIgen_RevolvedOgive.step`, `2026-05-05_c2debug_AIgen_RevolvedOgive*.{json,png}`, `2026-05-05_c2debug_AIgen_EllipticCylinder*.{json,png}`
+**Archive:** `archive/2026-04-29_parametric_*.step` (pre-C-2 baselines for all 6 prior parametric assets), `archive/2026-04-29_parametric_via-http_*.step` (HTTP-mode baselines), `archive/2026-04-29_curvedpost_baseline.step`, `archive/2026-04-29_ellipticcyl_baseline.step`, `archive/2026-04-29_ellipticcyl_c1.step`, `archive/2026-04-29_esp35_recheck.step`
+
+### Problem
+Vase / lathe / turned geometry had no detector. Such parts fell through to the box-CSG fallback, which approximated the curved volume as a rectangular envelope. Synthetic vase test asset routed via box CSG produced vol ratio 2.40 (60% over) and mean deviation 2.99 mm.
+
+### Tests Used
+`tools/test-parametric-step.py` — 7 parametric tests + determinism gate, all PASS:
+- MeshRing1 (Phase A coaxial cylinder)
+- Station_3_Baseplate (Phase A box)
+- MeshRing1-mold-top (Phase C-0 ring pocket)
+- ESP35Box (Phase D hollow shell)
+- AIgen_EllipticCylinder (Phase C-1)
+- AIgen_RevolvedOgive (Phase C-2 — NEW)
+- CurvedMinimalPost-Onshape (C baseline regression floor)
+- ESP35Box determinism check (two runs bit-identical modulo timestamp)
+
+### Interpretation
+C-2 detector + 5 reject gates ship cleanly. AIgen_RevolvedOgive vol ratio 0.9985, mean dev 0.109 mm (was 2.40 / 2.99 mm pre-C-2 — 58% volume accuracy improvement). STEP contains native `SURFACE_OF_REVOLUTION` over `B_SPLINE_CURVE_WITH_KNOTS`. No regressions on the 6 pre-existing parametric assets — their reject gates each fire (theta-coverage for boxes/posts, mean r-MAD for ellipses, profile-jump for annular rings, sign-changes for cylinders/cones). See `LearningLog/2026-05-05_PhaseC2_Revolutions.md` for the five gotchas captured during integration. Detector code in `tools/convert-stl-to-step-parametric-with-freecad.py` (~600 new lines); standalone debug harness `tools/debug-revolution-fit.py`; synthetic-asset generator `tools/generate-revolved-profile-test.py`.
+
+---
+
+## Surface Texture (Phase 1 → Multi-Region → Geodesic Bumps)
+**Dates:** 2026-04-17 (Phase 1 + Phase 3), 2026-04-22 (Multi-region registry), 2026-04-28 (Geodesic Poisson-disk bumps)
+**Status:** Resolved
+**Active:** none (feature shipped; live-feature documentation in repo memory + `LearningLog/2026-04-28_GeodesicBumpPlacement.md`)
+**Archive:** `archive/2026-04-17_triplanar-*.{png,stl}` (initial triplanar test images), `archive/2026-04-20_*-bumps.png`, `archive/2026-04-20_*-weave*.png`, `archive/2026-04-20_TRIPLANAR_BUMP_SUMMARY.md` (triplanar exploration), `archive/2026-04-28_*` (cluster/triplanar/multi-region screenshots + baselines + WEEK1_STATUS.md), `archive/2026-04-29_*` (next-day re-run set with same naming), `archive/2026-04-28_TRIPLANAR_BUMP_SUMMARY.md`, `archive/BASELINE_SUMMARY.md` (Week 1 baseline metrics)
+
+### Problem
+Surface-texture feature evolved through three iterations across late April: (1) per-cluster bumps + per-face UV weave, (2) persistent multi-region layer registry so users could stack multiple textured patches, (3) replacement of triplanar global grid with stratified surface Poisson-disk for geodesically-uniform bump spacing. Each iteration produced its own baseline screenshot set, accumulating in Testoutput/ root.
+
+### Tests Used
+`tests/texture-phase1-clusters.spec.js` (8/8), `tests/texture-triplanar.spec.js` (6/6), `tests/texture-multiregion.spec.js` (5/5). Canonical 19/19 pass on shipped state (commit b0bee30, 2026-04-28).
+
+### Interpretation
+Feature is live. Aloy Focus 148 bumps, Ring 262, Baseplate 1038 (geodesic Poisson-disk counts). All baseline screenshots from the iterations archived to `Testoutput/archive/`. Source-of-truth documentation: `LearningLog/2026-04-16_SurfaceTexture*.md`, `LearningLog/2026-04-17_TexturePhase1_Clusters_PerFaceUV.md`, `LearningLog/2026-04-22_PersistentMultiRegionTexture.md`, `LearningLog/2026-04-28_GeodesicBumpPlacement.md`. No active regression artifacts in Testoutput/ root for this feature; future texture work will create a new dated entry.
+
+---
+
+## Mold-Top + Phase D Regression Re-checks (Pre-C-2)
+**Date:** 2026-04-22, 2026-04-23
+**Status:** Resolved (superseded by 2026-05-05 sweep)
+**Active:** none
+**Archive:** `archive/2026-04-22_ESP35Box_parametric.step`, `archive/2026-04-22_parametric_*.step`, `archive/2026-04-23_parametric_*.step`
+
+### Problem
+Pre-C-2 regression checks on ESP35Box, MeshRing1, Baseplate, mold-top after the Phase D / sprue-corner-suppression / Phase C-1 work landed.
+
+### Interpretation
+Superseded by 2026-05-05 parametric sweep (active above). Files archived for historical comparison.
+
+---
+
 ## Slice / Cross-Section View
 **Date:** 2026-04-02
 **Status:** Resolved

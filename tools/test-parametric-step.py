@@ -140,8 +140,8 @@ TESTS = [
         "max_mean_dev_mm": 1.0,
     },
     {
-        "stl": "EllipticCylinder.stl",
-        "description": "Phase C-1 — synthetic elliptic cylinder (a=10, b=6, h=30)",
+        "stl": "AIgen_EllipticCylinder.stl",
+        "description": "Phase C-1 — AI-generated synthetic elliptic cylinder (a=10, b=6, h=30)",
         "expect_log": [
             "detecting elliptic cylinders",
             "elliptic 1:",
@@ -157,6 +157,39 @@ TESTS = [
         "vol_ratio_min": 0.98,
         "vol_ratio_max": 1.02,
         "max_mean_dev_mm": 0.05,
+    },
+    {
+        "stl": "AIgen_RevolvedOgive.stl",
+        "description": (
+            "Phase C-2 — AI-generated synthetic vase (B-spline profile revolved"
+            " 360 around Z). Routes through revolution CSG path; STEP contains"
+            " native SURFACE_OF_REVOLUTION over a B_SPLINE_CURVE_WITH_KNOTS"
+            " profile."
+        ),
+        "expect_log": [
+            "detecting planes",
+            "detecting surface of revolution",
+            "revolution accepted",
+            "revolution CSG solid",
+            "analytical solid",
+        ],
+        "reject_log": [
+            "triangulated fallback",
+            "non-smooth (likely annular ring), defer",
+            "non-circular cross-section",
+        ],
+        "expect_step": ["SURFACE_OF_REVOLUTION", "B_SPLINE_CURVE_WITH_KNOTS", "PLANE"],
+        "reject_step": [],
+        # Revolution path produces vol ratio ~0.998 vs the box-envelope baseline
+        # of 2.40 (a ~58% accuracy improvement over pre-C-2). Mean dev sits at
+        # ~0.11mm — limited by the sharp shoulder→top discontinuity in the
+        # synthetic vase profile, which a smooth B-spline can't trace exactly.
+        # 0.20mm tolerance leaves room for FreeCAD-version drift in the
+        # BSplineCurve.approximate fit.
+        "min_coverage": 0.50,
+        "vol_ratio_min": 0.98,
+        "vol_ratio_max": 1.02,
+        "max_mean_dev_mm": 0.20,
     },
     {
         "stl": "CurvedMinimalPost-Onshape.stl",

@@ -55,10 +55,18 @@ def fail(msg):
     sys.exit(1)
 
 
+# Strip optional debug flags before the strict arg-count check so the rest of
+# the CLI signature remains <input.stl> <output.step>. DEBUG_C2 is consumed
+# later by find_revolution_axis and related Phase C-2 code paths.
+DEBUG_C2 = "--debug-c2" in sys.argv
+if DEBUG_C2:
+    sys.argv = [a for a in sys.argv if a != "--debug-c2"]
+
+
 if len(sys.argv) != 3:
     fail(
         "Usage: FreeCADCmd convert-stl-to-step-parametric-with-freecad.py "
-        "<input.stl> <output.step>"
+        "<input.stl> <output.step> [--debug-c2]"
     )
 
 input_path  = os.path.abspath(sys.argv[1])
@@ -157,6 +165,43 @@ ELLIPTIC_MIN_INLIERS         = 30    # minimum faces for a valid elliptic cyl
 ELLIPSE_INLIER_TOL           = 0.30  # mm — perp distance threshold
 # Reject as a circle (handled by Phase A) when the axis ratio b/a exceeds this:
 ELLIPTIC_MIN_AXIS_RATIO_GAP  = 0.05  # require (a-b)/a > this — i.e. b/a < 0.95
+
+# Phase C-2: Surface-of-revolution detection.
+# A revolution feature has uniform theta-coverage and tight r-variance per
+# z-bucket along the revolution axis. Score combines those into a unitless
+# value in roughly [0, 1]; values above REVOLUTION_MIN_SCORE qualify.
+REVOLUTION_MIN_INLIERS       = 60    # minimum faces for a valid revolution
+REVOLUTION_MIN_SCORE         = 0.55  # min combined inlier-frac × theta-cov / (1 + r-mad/r-scale)
+REVOLUTION_MIN_THETA_COVERAGE = 0.75  # mean fraction of theta-buckets per z-bucket
+REVOLUTION_R_INLIER_K_MAD    = 3.0   # accept face if |r - r_med| < K × MAD per z-bucket
+REVOLUTION_N_Z_BUCKETS       = 24    # z-bucket count for axis scoring
+REVOLUTION_N_THETA_BUCKETS   = 12    # theta-bucket count for coverage check
+# Mean per-bucket r-MAD ceiling — discriminates true revolutions (constant r
+# at each z) from elliptic cylinders (r varies with θ within each z-bucket).
+# Vase test: mean r-MAD / r-max ≈ 0.014. Elliptic test: ≈ 0.107.
+# Threshold 0.03 rejects elliptic, accepts true revolutions, and tolerates
+# the occasional transition bucket where r changes sharply within one slice.
+REVOLUTION_MAX_R_MAD_FRACTION = 0.03
+
+# Profile-fit settings (Step 3)
+REVOLUTION_PROFILE_MIN_PTS   = 6     # need ≥6 (z, r) points for degree-3 spline fit
+REVOLUTION_PROFILE_TOLERANCE = 0.05  # mm — BSplineCurve.approximate tolerance
+REVOLUTION_PROFILE_DEG_MAX   = 5     # cap spline degree to keep STEP small
+# A revolution profile that fits a straight horizontal line in (z, r) is a
+# cylinder — already handled by Phase A. Skip if r-stdev is below this.
+REVOLUTION_PROFILE_CYL_R_STDEV = 0.05  # mm
+# A monotonic r(z) profile is either a cylinder (Phase A), a stepped cylinder
+# (= multiple coaxial cylinders, also Phase A), or a cone (future). C-2's
+# value-add is profiles with at least one local extremum (waist, shoulder).
+# Monotonicity changes counted via consecutive dr/dz sign changes after
+# discarding near-flat segments (|dr| < REVOLUTION_PROFILE_FLAT_DR mm).
+REVOLUTION_PROFILE_MIN_MONOTONICITY_CHANGES = 1
+REVOLUTION_PROFILE_FLAT_DR = 0.05  # mm — ignore near-flat dr segments
+# Smoothness — annular rings (inner + outer cylinders at different r) produce
+# unstable per-bucket medians that bounce between the two radii. A single
+# revolution profile evolves smoothly. Reject if any consecutive r-jump
+# exceeds this fraction of the overall r-range.
+REVOLUTION_PROFILE_MAX_JUMP_FRACTION = 0.50
 
 
 # ── Load mesh ─────────────────────────────────────────────────────────────────
@@ -993,6 +1038,503 @@ def detect_elliptic_cylinders(face_centers, face_normals, used, total,
     return results
 
 
+# ── Phase C-2: Surface-of-revolution detection ───────────────────────────────
+
+
+def _orthonormal_frame(axis):
+    """Return (u, v, w) orthonormal frame with w = normalised axis."""
+    w = np.asarray(axis, dtype=float)
+    w = w / (np.linalg.norm(w) + 1e-12)
+    helper = np.array([1.0, 0.0, 0.0]) if abs(w[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
+    u = np.cross(w, helper)
+    u = u / (np.linalg.norm(u) + 1e-12)
+    v = np.cross(w, u)
+    return u, v, w
+
+
+def _project_cylindrical(points, origin, axis):
+    """Project points into (z, r, theta) about axis through origin."""
+    u, v, w = _orthonormal_frame(axis)
+    rel = points - origin
+    z = rel @ w
+    x = rel @ u
+    y = rel @ v
+    r = np.sqrt(x * x + y * y)
+    theta = np.arctan2(y, x)
+    return z, r, theta
+
+
+def _pca_principal_axis(points):
+    """Largest-variance direction of the point cloud (PCA principal axis)."""
+    centred = points - points.mean(axis=0)
+    cov = centred.T @ centred
+    _, eigvecs = np.linalg.eigh(cov)   # eigh returns ascending eigenvalues
+    return eigvecs[:, -1]
+
+
+def _score_revolution_axis(points, origin, axis,
+                           n_z_buckets=REVOLUTION_N_Z_BUCKETS,
+                           n_theta_buckets=REVOLUTION_N_THETA_BUCKETS):
+    """
+    Score a candidate revolution axis against a face-centre cluster.
+
+    A true revolution axis produces (z, r, theta) projection where r is
+    consistent within each z-bucket (median-absolute-deviation small) and
+    each z-bucket samples theta uniformly across the full circle.
+
+    Returns dict with axis, score (higher better), inlier mask (local to
+    `points`), and the per-bucket profile [(z_centre, r_med, n_total,
+    n_inlier)] for downstream Step 3 profile extraction.
+    """
+    z, r, theta = _project_cylindrical(points, origin, axis)
+    z_min, z_max = float(z.min()), float(z.max())
+    if z_max - z_min < 1e-6:
+        return {"axis": axis, "score": 0.0, "reject": "degenerate-z",
+                "inliers": np.zeros(len(points), dtype=bool),
+                "profile": [], "z_extent": (z_min, z_max),
+                "n_inliers": 0, "n_total": len(points)}
+
+    bucket_edges = np.linspace(z_min, z_max, n_z_buckets + 1)
+    bucket_idx   = np.clip(np.digitize(z, bucket_edges) - 1, 0, n_z_buckets - 1)
+    theta_edges  = np.linspace(-np.pi, np.pi, n_theta_buckets + 1)
+
+    profile        = []
+    inliers        = np.zeros(len(points), dtype=bool)
+    r_residuals    = []
+    theta_coverage = []
+
+    for b in range(n_z_buckets):
+        mask = bucket_idx == b
+        if mask.sum() < 3:
+            continue
+        r_b      = r[mask]
+        theta_b  = theta[mask]
+        r_med    = float(np.median(r_b))
+        r_mad    = float(np.median(np.abs(r_b - r_med))) + 1e-9
+        bucket_inliers = np.abs(r_b - r_med) < REVOLUTION_R_INLIER_K_MAD * r_mad
+        inliers[np.where(mask)[0][bucket_inliers]] = True
+        z_c = 0.5 * (bucket_edges[b] + bucket_edges[b + 1])
+        profile.append((float(z_c), r_med,
+                        int(mask.sum()), int(bucket_inliers.sum())))
+        r_residuals.append(r_mad)
+        theta_bins = np.clip(np.digitize(theta_b, theta_edges) - 1, 0, n_theta_buckets - 1)
+        theta_coverage.append(len(set(theta_bins.tolist())) / n_theta_buckets)
+
+    if not profile:
+        return {"axis": axis, "score": 0.0, "reject": "no-buckets",
+                "inliers": inliers, "profile": [], "z_extent": (z_min, z_max),
+                "n_inliers": 0, "n_total": len(points)}
+
+    inlier_frac     = float(inliers.sum()) / len(points)
+    mean_r_resid    = float(np.mean(r_residuals))
+    max_r_resid     = float(np.max(r_residuals))
+    mean_theta_cov  = float(np.mean(theta_coverage))
+    r_scale         = float(r.max() + 1e-6)
+    score = inlier_frac * mean_theta_cov / (1.0 + mean_r_resid / r_scale)
+
+    return {
+        "axis":            np.asarray(axis, dtype=float),
+        "score":           float(score),
+        "inlier_frac":     inlier_frac,
+        "mean_r_resid":    mean_r_resid,
+        "max_r_resid":     max_r_resid,
+        "max_r_resid_frac": max_r_resid / r_scale,
+        "mean_theta_cov":  mean_theta_cov,
+        "n_inliers":       int(inliers.sum()),
+        "n_total":         int(len(points)),
+        "z_extent":        (z_min, z_max),
+        "inliers":         inliers,
+        "profile":         profile,
+    }
+
+
+def find_revolution_axis(face_centers, face_normals, used, total):
+    """
+    Find the axis of a surface-of-revolution feature among unclaimed faces.
+
+    Returns dict {origin, axis, score, inlier_mask, profile, z_extent} or None.
+    The inlier_mask is in GLOBAL face-index space (size `total`); profile is
+    a list of (z_centre, r_med, n_total, n_inlier) tuples in axis-local
+    coordinates (z measured from origin along axis).
+
+    Caller is expected to mark inliers as `used` after consuming.
+
+    Strategy:
+      1. Restrict to currently-unclaimed faces.
+      2. Generate 4 candidate axes: the three coordinate axes plus the
+         PCA principal direction of the unclaimed face centres. The cheap
+         coordinate-aligned candidates handle the common "modeller
+         lined up the lathe to a global axis" case; PCA handles the rest.
+      3. Score each axis by inlier-fraction × theta-coverage / (1 + r-MAD).
+      4. Return the highest-scoring axis above REVOLUTION_MIN_SCORE.
+
+    Failure modes (all logged when DEBUG_C2):
+      - Too few unclaimed faces                 → return None
+      - Best score below MIN_SCORE              → return None (not a revolution)
+      - Best theta-coverage below MIN_THETA_COV → return None (partial-arc, not full revolve)
+    """
+    avail = ~used
+    n_avail = int(avail.sum())
+    if n_avail < REVOLUTION_MIN_INLIERS:
+        if DEBUG_C2:
+            print(f"[parametric][debug-c2] revolution: only {n_avail} unclaimed "
+                  f"faces (< {REVOLUTION_MIN_INLIERS}) — skip", flush=True)
+        return None
+
+    avail_idx = np.where(avail)[0]
+    pts       = face_centers[avail_idx]
+    centroid  = pts.mean(axis=0)
+
+    candidates = {
+        "X":   np.array([1.0, 0.0, 0.0]),
+        "Y":   np.array([0.0, 1.0, 0.0]),
+        "Z":   np.array([0.0, 0.0, 1.0]),
+        "pca": _pca_principal_axis(pts),
+    }
+
+    best       = None
+    best_label = None
+    for label, axis in candidates.items():
+        result = _score_revolution_axis(pts, centroid, axis)
+        if DEBUG_C2:
+            if "reject" in result:
+                print(f"[parametric][debug-c2]   axis {label}: rejected "
+                      f"({result['reject']})", flush=True)
+            else:
+                print(f"[parametric][debug-c2]   axis {label}: "
+                      f"score={result['score']:.3f} "
+                      f"inliers={result['n_inliers']}/{result['n_total']} "
+                      f"r-mad={result['mean_r_resid']:.3f}mm "
+                      f"theta-cov={result['mean_theta_cov']:.2f}", flush=True)
+        if best is None or result["score"] > best["score"]:
+            best       = result
+            best_label = label
+
+    if best is None or best.get("score", 0.0) < REVOLUTION_MIN_SCORE:
+        score = best.get("score", 0.0) if best else 0.0
+        print(f"[parametric] revolution detect: best axis '{best_label}' "
+              f"score {score:.3f} < {REVOLUTION_MIN_SCORE} — no revolution", flush=True)
+        return None
+    if best.get("mean_theta_cov", 0.0) < REVOLUTION_MIN_THETA_COVERAGE:
+        print(f"[parametric] revolution detect: best axis '{best_label}' "
+              f"theta-cov {best['mean_theta_cov']:.2f} < "
+              f"{REVOLUTION_MIN_THETA_COVERAGE} — partial-arc, not a full revolution",
+              flush=True)
+        return None
+    r_scale = max(p[1] for p in best["profile"]) + 1e-6 if best.get("profile") else 1.0
+    mean_r_mad_frac = best.get("mean_r_resid", 0.0) / r_scale
+    if mean_r_mad_frac > REVOLUTION_MAX_R_MAD_FRACTION:
+        # r varies too much within z-buckets on average — not a clean
+        # revolution (likely an elliptic / non-circular extrusion). Use mean
+        # not max to avoid rejecting on single transitional buckets.
+        print(f"[parametric] revolution detect: best axis '{best_label}' "
+              f"mean r-MAD {best['mean_r_resid']:.3f}mm "
+              f"= {mean_r_mad_frac*100:.1f}% of r-max "
+              f"> {REVOLUTION_MAX_R_MAD_FRACTION*100:.0f}% — non-circular cross-section",
+              flush=True)
+        return None
+    if best["n_inliers"] < REVOLUTION_MIN_INLIERS:
+        print(f"[parametric] revolution detect: only {best['n_inliers']} inliers "
+              f"(< {REVOLUTION_MIN_INLIERS}) — skip", flush=True)
+        return None
+
+    global_mask = np.zeros(total, dtype=bool)
+    global_mask[avail_idx[best["inliers"]]] = True
+
+    print(f"[parametric] revolution detect: axis '{best_label}'={best['axis'].tolist()}, "
+          f"score={best['score']:.3f}, inliers={best['n_inliers']}/{n_avail}, "
+          f"r-mad={best['mean_r_resid']:.3f}mm, theta-cov={best['mean_theta_cov']:.2f}",
+          flush=True)
+
+    return {
+        "origin":      centroid,
+        "axis":        best["axis"],
+        "label":       best_label,
+        "score":       best["score"],
+        "inlier_mask": global_mask,
+        "z_extent":    best["z_extent"],
+        "profile":     best["profile"],
+    }
+
+
+def extract_profile_zr(profile_buckets, z_extent=None, min_inliers_per_bucket=3):
+    """
+    Convert find_revolution_axis bucket profile to a clean (z, r) array.
+
+    Drops sparse buckets and sorts by z. Returns Nx2 ndarray or None if too
+    few points remain.
+
+    Each input bucket is (z_centre, r_median, n_total, n_inlier).
+
+    If z_extent (z_lo, z_hi) is provided, anchors the profile to the true
+    z bounds of the cluster by prepending/appending sample points using the
+    nearest bucket's r value. Without this, the profile only spans
+    bucket-centre to bucket-centre and the resulting solid under-fills the
+    extruded volume by ~one bucket-width on each end.
+    """
+    pts = [(z, r) for (z, r, _n, n_inl) in profile_buckets
+           if n_inl >= min_inliers_per_bucket]
+    if len(pts) < REVOLUTION_PROFILE_MIN_PTS:
+        return None
+    pts.sort(key=lambda zr: zr[0])
+
+    if z_extent is not None:
+        z_lo_actual, z_hi_actual = float(z_extent[0]), float(z_extent[1])
+        EXTEND_EPS = 1e-3
+        if pts[0][0] > z_lo_actual + EXTEND_EPS:
+            pts.insert(0, (z_lo_actual, pts[0][1]))
+        if pts[-1][0] < z_hi_actual - EXTEND_EPS:
+            pts.append((z_hi_actual, pts[-1][1]))
+
+    arr = np.array(pts, dtype=float)
+    # Deduplicate identical z values (B-spline approximate fails on duplicates)
+    _, unique_idx = np.unique(arr[:, 0], return_index=True)
+    arr = arr[np.sort(unique_idx)]
+    if len(arr) < REVOLUTION_PROFILE_MIN_PTS:
+        return None
+    return arr
+
+
+def fit_revolution_profile(zr_pts):
+    """
+    Fit a B-spline curve to a (z, r) revolution profile in axis-local frame.
+
+    The B-spline is laid in the XZ plane with x = r, y = 0, z = z_local.
+    Step 4 will translate/rotate it into the world axis frame and revolve.
+
+    Reject gates (return None):
+      - r std-dev below REVOLUTION_PROFILE_CYL_R_STDEV → cylinder (Phase A)
+      - fewer than REVOLUTION_PROFILE_MIN_PTS valid samples
+      - approximate() residual exceeds REVOLUTION_PROFILE_TOLERANCE
+
+    Returns dict with:
+      bspline:    Part.BSplineCurve in axis-local XZ plane
+      z_local:    list of z values used
+      r_local:    list of r values used
+      residual:   max absolute distance from input points to fitted curve
+      degree:     final spline degree
+      n_poles:    number of control points
+      r_stdev:    raw stdev of r values (degenerate-cylinder guard)
+    """
+    if zr_pts is None or len(zr_pts) < REVOLUTION_PROFILE_MIN_PTS:
+        if DEBUG_C2:
+            print(f"[parametric][debug-c2] profile fit: insufficient points "
+                  f"({0 if zr_pts is None else len(zr_pts)} < "
+                  f"{REVOLUTION_PROFILE_MIN_PTS})", flush=True)
+        return None
+
+    z_arr = zr_pts[:, 0]
+    r_arr = zr_pts[:, 1]
+    r_stdev = float(np.std(r_arr))
+    if r_stdev < REVOLUTION_PROFILE_CYL_R_STDEV:
+        if DEBUG_C2:
+            print(f"[parametric][debug-c2] profile fit: r-stdev {r_stdev:.4f}mm "
+                  f"< {REVOLUTION_PROFILE_CYL_R_STDEV}mm — degenerate cylinder, "
+                  f"defer to Phase A", flush=True)
+        return None
+
+    # Monotonicity-change check: defer monotonic r(z) to Phase A (cylinder,
+    # stepped cylinder, cone). Counts dr/dz sign reversals after dropping
+    # near-flat segments.
+    diffs = np.diff(r_arr)
+    sign_changes = 0
+    last_sign = 0
+    for d in diffs:
+        if abs(d) < REVOLUTION_PROFILE_FLAT_DR:
+            continue
+        sign = 1 if d > 0 else -1
+        if last_sign != 0 and sign != last_sign:
+            sign_changes += 1
+        last_sign = sign
+    r_range = float(r_arr.max() - r_arr.min())
+    max_jump = float(np.max(np.abs(diffs))) if diffs.size else 0.0
+    if DEBUG_C2:
+        print(f"[parametric][debug-c2] profile fit: r samples = "
+              f"{[round(x, 2) for x in r_arr.tolist()]}, "
+              f"sign_changes={sign_changes}, max-jump={max_jump:.2f}mm, "
+              f"r-range={r_range:.2f}mm", flush=True)
+
+    # Smoothness: reject if any consecutive r jump exceeds X% of r-range.
+    # Catches annular rings whose per-bucket median oscillates between inner
+    # and outer cylinder radii.
+    if r_range > 0.1 and max_jump / r_range > REVOLUTION_PROFILE_MAX_JUMP_FRACTION:
+        print(f"[parametric] revolution profile fit: max r-jump {max_jump:.2f}mm "
+              f"= {max_jump/r_range*100:.0f}% of r-range "
+              f"> {REVOLUTION_PROFILE_MAX_JUMP_FRACTION*100:.0f}% — "
+              f"non-smooth (likely annular ring), defer", flush=True)
+        return None
+
+    if sign_changes < REVOLUTION_PROFILE_MIN_MONOTONICITY_CHANGES:
+        if DEBUG_C2:
+            print(f"[parametric][debug-c2] profile fit: only {sign_changes} dr/dz "
+                  f"sign change(s) (< {REVOLUTION_PROFILE_MIN_MONOTONICITY_CHANGES}) "
+                  f"— monotonic profile, defer to cylinder/cone detector",
+                  flush=True)
+        return None
+
+    # Lay points into XZ plane: x = r, y = 0, z = z
+    pts_3d = [FreeCAD.Vector(float(r), 0.0, float(z))
+              for z, r in zip(z_arr, r_arr)]
+
+    bspline = Part.BSplineCurve()
+    try:
+        bspline.approximate(
+            Points=pts_3d,
+            DegMin=3,
+            DegMax=REVOLUTION_PROFILE_DEG_MAX,
+            Tolerance=REVOLUTION_PROFILE_TOLERANCE,
+            Continuity="C2",
+        )
+    except Exception as exc:
+        print(f"[parametric] profile fit failed: {exc}", flush=True)
+        return None
+
+    # Compute residual: max distance from each input point to the fitted curve
+    residuals = []
+    for v in pts_3d:
+        try:
+            param = bspline.parameter(v)
+            cv = bspline.value(param)
+            residuals.append(float((cv - v).Length))
+        except Exception:
+            residuals.append(0.0)
+    max_residual = float(max(residuals)) if residuals else 0.0
+
+    if max_residual > REVOLUTION_PROFILE_TOLERANCE * 4.0:
+        # B-spline approximate sometimes returns a curve that overshoots its
+        # own tolerance setting (rare; happens on inflection-heavy profiles).
+        # 4× ceiling guards against silent bad fits.
+        print(f"[parametric] profile fit: residual {max_residual:.3f}mm "
+              f"exceeds 4× tolerance ({REVOLUTION_PROFILE_TOLERANCE * 4:.3f}mm) "
+              f"— rejecting", flush=True)
+        return None
+
+    n_poles = bspline.NbPoles if hasattr(bspline, "NbPoles") else len(bspline.getPoles())
+    degree  = bspline.Degree if hasattr(bspline, "Degree") else 3
+
+    if DEBUG_C2:
+        print(f"[parametric][debug-c2] profile fit: {len(pts_3d)} pts -> "
+              f"degree {degree}, {n_poles} poles, residual {max_residual:.4f}mm, "
+              f"r=[{r_arr.min():.2f},{r_arr.max():.2f}] z=[{z_arr.min():.2f},{z_arr.max():.2f}]",
+              flush=True)
+
+    return {
+        "bspline":  bspline,
+        "z_local":  z_arr.tolist(),
+        "r_local":  r_arr.tolist(),
+        "residual": max_residual,
+        "degree":   int(degree),
+        "n_poles":  int(n_poles),
+        "r_stdev":  r_stdev,
+    }
+
+
+def build_revolution_solid(revolution, profile_fit):
+    """
+    Build a Part.Solid from a detected revolution + B-spline profile fit.
+
+    Profile wire is constructed in axis-local XZ plane (x = r, y = 0,
+    z = z_local), revolved 360° about local Z, then transformed to the
+    world frame via a Placement that rotates local-Z onto the world axis
+    and translates to the world origin.
+
+    Pole edge case: if r_lo or r_hi is below POLE_EPS, the corresponding
+    axis-closing edge is degenerate (zero length) and is skipped — the
+    profile already meets the axis at that endpoint.
+
+    Returns Part.Solid in world coordinates, or None on construction failure.
+    """
+    POLE_EPS = 1e-3
+
+    bspline = profile_fit["bspline"]
+    z_local = profile_fit["z_local"]
+    r_local = profile_fit["r_local"]
+
+    z_lo, z_hi = float(z_local[0]),  float(z_local[-1])
+    r_lo, r_hi = float(r_local[0]),  float(r_local[-1])
+
+    edges = [bspline.toShape()]
+
+    # Top closing edge: profile end → axis at z_hi
+    if r_hi > POLE_EPS:
+        edges.append(Part.LineSegment(
+            FreeCAD.Vector(r_hi, 0.0, z_hi),
+            FreeCAD.Vector(0.0,  0.0, z_hi),
+        ).toShape())
+    # Axis closure: down the rotation axis
+    edges.append(Part.LineSegment(
+        FreeCAD.Vector(0.0, 0.0, z_hi),
+        FreeCAD.Vector(0.0, 0.0, z_lo),
+    ).toShape())
+    # Bottom closing edge: axis at z_lo → profile start
+    if r_lo > POLE_EPS:
+        edges.append(Part.LineSegment(
+            FreeCAD.Vector(0.0, 0.0, z_lo),
+            FreeCAD.Vector(r_lo, 0.0, z_lo),
+        ).toShape())
+
+    try:
+        wire = Part.Wire(edges)
+    except Exception as exc:
+        print(f"[parametric] revolution wire construction failed: {exc}", flush=True)
+        if DEBUG_C2:
+            for i, e in enumerate(edges):
+                print(f"[parametric][debug-c2]   edge {i}: {e}", flush=True)
+        return None
+
+    if not wire.isClosed():
+        print("[parametric] revolution wire not closed", flush=True)
+        return None
+
+    try:
+        face = Part.Face(wire)
+    except Exception as exc:
+        print(f"[parametric] revolution face construction failed: {exc}", flush=True)
+        return None
+
+    # Revolve 360° around local Z
+    try:
+        local_solid = face.revolve(
+            FreeCAD.Vector(0.0, 0.0, 0.0),
+            FreeCAD.Vector(0.0, 0.0, 1.0),
+            360.0,
+        )
+    except Exception as exc:
+        print(f"[parametric] revolve operation failed: {exc}", flush=True)
+        return None
+
+    if not local_solid.isValid():
+        print("[parametric] revolved solid is not valid", flush=True)
+        return None
+
+    # Transform local frame → world: rotate local-Z onto world axis, then
+    # translate to world origin.
+    world_axis = revolution["axis"]
+    world_origin = revolution["origin"]
+    rot = FreeCAD.Rotation(
+        FreeCAD.Vector(0.0, 0.0, 1.0),
+        FreeCAD.Vector(float(world_axis[0]),
+                       float(world_axis[1]),
+                       float(world_axis[2])),
+    )
+    placement = FreeCAD.Placement(
+        FreeCAD.Vector(float(world_origin[0]),
+                       float(world_origin[1]),
+                       float(world_origin[2])),
+        rot,
+    )
+    local_solid.Placement = placement
+
+    if DEBUG_C2:
+        bb = local_solid.BoundBox
+        print(f"[parametric][debug-c2] revolution solid: "
+              f"bbox=({bb.XMin:.2f},{bb.YMin:.2f},{bb.ZMin:.2f})-"
+              f"({bb.XMax:.2f},{bb.YMax:.2f},{bb.ZMax:.2f}), "
+              f"vol={local_solid.Volume:.2f}mm^3", flush=True)
+
+    return local_solid
+
+
 # ── Run detection ─────────────────────────────────────────────────────────────
 # Planes are detected first across ALL faces using a normal-alignment filter.
 # This correctly separates flat surfaces (consistent normals) from curved faces
@@ -1100,14 +1642,50 @@ for ec in elliptic_cyls:
     used[ec["inlier_mask"]] = True
 elliptic_inliers = sum(ec["inliers"] for ec in elliptic_cyls)
 
+# Phase C-2: Detect surface of revolution. Runs on `used_after_planes` mask
+# (only plane caps claimed) so it sees the full lateral face set regardless
+# of what cylinder/torus/sphere/elliptic claimed. The detector's reject
+# gates (theta-coverage, mean r-MAD, profile smoothness, monotonicity-change)
+# prevent it from claiming pure cylinders, ellipses, boxes, swept posts,
+# or annular rings — those keep their existing pipeline routing.
+print("[parametric] detecting surface of revolution …", flush=True)
+revolution_data = None
+_rev_raw = find_revolution_axis(face_centers, face_normals,
+                                used_after_planes, total_faces)
+if _rev_raw is not None:
+    _zr = extract_profile_zr(_rev_raw["profile"], z_extent=_rev_raw["z_extent"])
+    if _zr is None:
+        print("[parametric] revolution: profile extract gave insufficient buckets",
+              flush=True)
+    else:
+        _profile_fit = fit_revolution_profile(_zr)
+        if _profile_fit is None:
+            # fit_revolution_profile already logged its rejection reason.
+            pass
+        else:
+            revolution_data = {**_rev_raw, "profile_fit": _profile_fit}
+            print(f"[parametric] revolution accepted: profile degree "
+                  f"{_profile_fit['degree']}, "
+                  f"residual {_profile_fit['residual']:.4f}mm, "
+                  f"r=[{min(_profile_fit['r_local']):.2f},"
+                  f"{max(_profile_fit['r_local']):.2f}]mm",
+                  flush=True)
+            # Mark inliers used so subsequent box/circle detection paths
+            # (run inside build_box_solid) don't re-claim revolution faces.
+            used[revolution_data["inlier_mask"]] = True
+revolutions = [revolution_data] if revolution_data is not None else []
+revolution_inliers = revolution_data["inlier_mask"].sum() if revolution_data else 0
+
 # Preliminary coverage (box fillet claiming deferred until after function definitions).
 coverage = (
-    cyl_inliers + plane_inliers + torus_inliers + sphere_inliers + elliptic_inliers
+    cyl_inliers + plane_inliers + torus_inliers + sphere_inliers
+    + elliptic_inliers + int(revolution_inliers)
 ) / total_faces
 print(
     f"[parametric] coverage={coverage:.1%}  "
     f"({len(cylinders)} cyl, {len(planes)} plane, {len(tori)} torus, "
-    f"{len(spheres)} sphere, {len(elliptic_cyls)} elliptic)",
+    f"{len(spheres)} sphere, {len(elliptic_cyls)} elliptic, "
+    f"{len(revolutions)} revolution)",
     flush=True
 )
 
@@ -3008,15 +3586,15 @@ def build_sphere_solid(spheres):
 
 
 def build_parametric_solid(cylinders, planes, face_centers, face_normals, used_after_planes,
-                           tori=None, spheres=None, elliptic_cyls=None):
+                           tori=None, spheres=None, elliptic_cyls=None, revolutions=None):
     """
     Attempt CSG reconstruction.  Returns a Part.Shape or None on failure.
 
-    Routes to build_box_solid for prismatic parts (4+ planes detected),
-    the cylindrical CSG path for coaxial ring/boss parts, the elliptic-
-    cylinder path for parts whose body is a Z-extruded ellipse, or the sphere
-    path for sphere-dominated geometry.  Phase B: fuses detected tori
-    (fillets) into the coaxial cylinder solid.
+    Routes (in priority order):
+      1. Revolution (Phase C-2) — surface-of-revolution body (vase/lathe profile)
+      2. Box (4+ planes) — prismatic parts
+      3. Elliptic cylinder (Phase C-1) — Z-extruded ellipse body
+      4. Cylindrical (with torus/sphere) — coaxial ring/boss parts
     """
     if tori is None:
         tori = []
@@ -3024,8 +3602,25 @@ def build_parametric_solid(cylinders, planes, face_centers, face_normals, used_a
         spheres = []
     if elliptic_cyls is None:
         elliptic_cyls = []
+    if revolutions is None:
+        revolutions = []
     ext_cyls = [c for c in cylinders if not c["concave"]]
     int_cyls = [c for c in cylinders if c["concave"]]
+
+    # Revolution path (Phase C-2): wins when a clean surface-of-revolution
+    # is detected. The detector's reject gates already filter out cylinders
+    # (degenerate cyl r-stdev), elliptic cylinders (r-MAD), boxes (theta
+    # coverage), annular rings (profile smoothness), and monotonic profiles
+    # (cones). What remains is genuine vase/lathe geometry that the box,
+    # elliptic, or cylindrical paths can only approximate.
+    if revolutions:
+        rev = revolutions[0]
+        solid = build_revolution_solid(rev, rev["profile_fit"])
+        if solid is not None:
+            print("[parametric] revolution CSG solid", flush=True)
+            return solid
+        print("[parametric] revolution build failed — trying other paths",
+              flush=True)
 
     # Box path: triggered when 4+ planes detected (cap + vertical walls).
     # Cylindrical parts (rings, bosses) have only 2 cap planes → won't reach this.
@@ -3296,7 +3891,7 @@ try:
     if coverage >= MIN_COVERAGE_FOR_PARAMETRIC:
         shape = build_parametric_solid(
             cylinders, planes, face_centers, face_normals, used_after_planes,
-            tori, spheres, elliptic_cyls,
+            tori, spheres, elliptic_cyls, revolutions,
         )
         if shape:
             print("[parametric] using analytical solid", flush=True)

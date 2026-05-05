@@ -80,7 +80,7 @@ In `build_parametric_solid`, the elliptic-cylinder path now takes precedence ove
 
 ## Test Setup
 
-`tools/generate-elliptic-cylinder-test.py` writes `TestDocs/EllipticCylinder.stl` from canonical FreeCAD operations:
+`tools/generate-elliptic-cylinder-test.py` writes `TestDocs/AIgen_EllipticCylinder.stl` from canonical FreeCAD operations:
 
 ```python
 ellipse = Part.Ellipse(FreeCAD.Vector(0, 0, 0), 10, 6)

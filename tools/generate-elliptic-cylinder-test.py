@@ -1,6 +1,9 @@
 """
 Generate a synthetic elliptic-cylinder STL for Phase C-1 testing.
 
+This is an AI-GENERATED synthetic asset — not captured ground truth.
+Listed in TestDocs/README_AI_GENERATED.md.
+
 Creates an axis-aligned (Z-extruded) elliptic cylinder:
   - semi-axis a (along X) = 10 mm
   - semi-axis b (along Y) = 6 mm
@@ -12,7 +15,7 @@ Run with FreeCAD's Python:
     "C:/Program Files/FreeCAD 1.0/bin/python.exe" \
         tools/generate-elliptic-cylinder-test.py
 
-Writes: TestDocs/EllipticCylinder.stl
+Writes: TestDocs/AIgen_EllipticCylinder.stl
 """
 
 import os
@@ -23,7 +26,7 @@ import Part
 import Mesh
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-OUTPUT    = os.path.join(REPO_ROOT, "TestDocs", "EllipticCylinder.stl")
+OUTPUT    = os.path.join(REPO_ROOT, "TestDocs", "AIgen_EllipticCylinder.stl")
 
 # Ellipse parameters
 SEMI_A = 10.0   # mm — along X
